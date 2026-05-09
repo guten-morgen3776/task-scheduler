@@ -70,9 +70,9 @@ async def create_task_in_list(
             parent_id=payload.parent_id,
             due=payload.due,
             duration_min=payload.duration_min,
-            weight=payload.weight,
             priority=payload.priority,
             deadline=payload.deadline,
+            location=payload.location,
         )
     except tasks_service.ListNotFound as e:
         raise _list_not_found() from e

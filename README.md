@@ -144,6 +144,45 @@ OpenAPI ドキュメント: http://localhost:8000/docs
 `GET /calendar/calendars` でカレンダー一覧を取得し、`GET /calendar/events?calendar_ids=a,b,c` で複数指定取得できます。
 Phase 2 で `user_settings.busy_calendar_ids` / `ignore_calendar_ids` を導入し、毎回パラメータを渡さなくても済むようにします。
 
+### Phase 2 動作確認（スロット生成）
+
+```bash
+# 現在の設定確認（初回は既定値で作成）
+curl http://localhost:8000/settings | python -m json.tool
+
+# 祝日カレンダーを ignore に追加
+curl -X PUT http://localhost:8000/settings \
+  -H "Content-Type: application/json" \
+  -d '{"ignore_calendar_ids":["ja.japanese#holiday@group.v.calendar.google.com"]}'
+
+# 来週分のスロット生成（祝日以外の全カレンダー横断）
+curl "http://localhost:8000/calendar/slots\
+?start=2026-05-11T00:00:00%2B09:00\
+&end=2026-05-17T23:59:59%2B09:00" | python -m json.tool
+```
+
+詳細: [docs/phase2_design.md](docs/phase2_design.md) / [docs/api_cheatsheet.md §4.5–§4.6](docs/api_cheatsheet.md)
+
+### Phase 3 動作確認（最適化）
+
+```bash
+# タスクを 5-10 個入れた状態で
+curl -X POST http://localhost:8000/optimize \
+  -H "Content-Type: application/json" \
+  -d '{"start":"2026-05-11T00:00:00+09:00","end":"2026-05-17T23:59:59+09:00"}' \
+  | python -m json.tool
+
+# スナップショット一覧
+curl http://localhost:8000/optimizer/snapshots
+
+# 設定変えて同じ入力で再実行（同じ snapshot を replay）
+curl -X POST http://localhost:8000/optimizer/snapshots/<id>/replay \
+  -H "Content-Type: application/json" \
+  -d '{"config_overrides":{"weights":{"energy_match":0.2}}}'
+```
+
+詳細: [docs/phase3_design.md](docs/phase3_design.md) / [docs/api_cheatsheet.md §4.7](docs/api_cheatsheet.md)
+
 ### テスト
 
 ```bash

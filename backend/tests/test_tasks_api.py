@@ -14,7 +14,6 @@ async def test_full_crud_flow(client: AsyncClient) -> None:
         json={
             "title": "レポート執筆",
             "duration_min": 90,
-            "weight": 0.8,
             "priority": 4,
             "deadline": "2026-05-15T23:59:59+09:00",
         },
@@ -23,9 +22,9 @@ async def test_full_crud_flow(client: AsyncClient) -> None:
     task = r.json()
     assert task["title"] == "レポート執筆"
     assert task["duration_min"] == 90
-    assert task["weight"] == 0.8
     assert task["priority"] == 4
     assert task["completed"] is False
+    assert task["scheduled_end"] is None
     task_id = task["id"]
 
     r = await client.get(f"/lists/{list_id}/tasks")
@@ -36,10 +35,10 @@ async def test_full_crud_flow(client: AsyncClient) -> None:
     assert r.status_code == 200
     assert r.json()["subtasks"] == []
 
-    r = await client.patch(f"/tasks/{task_id}", json={"title": "改題", "weight": 0.5})
+    r = await client.patch(f"/tasks/{task_id}", json={"title": "改題", "duration_min": 60})
     assert r.status_code == 200
     assert r.json()["title"] == "改題"
-    assert r.json()["weight"] == 0.5
+    assert r.json()["duration_min"] == 60
 
     r = await client.post(f"/tasks/{task_id}/complete")
     assert r.status_code == 200
@@ -69,14 +68,21 @@ async def test_defaults_applied_when_unspecified(client: AsyncClient) -> None:
     assert r.status_code == 201
     task = r.json()
     assert task["duration_min"] == 60
-    assert task["weight"] == 0.5
     assert task["priority"] == 3
 
 
-async def test_invalid_weight_rejected(client: AsyncClient) -> None:
+async def test_invalid_priority_rejected(client: AsyncClient) -> None:
     list_id = await _make_list(client)
     r = await client.post(
-        f"/lists/{list_id}/tasks", json={"title": "x", "weight": 1.5}
+        f"/lists/{list_id}/tasks", json={"title": "x", "priority": 99}
+    )
+    assert r.status_code == 422
+
+
+async def test_invalid_duration_rejected(client: AsyncClient) -> None:
+    list_id = await _make_list(client)
+    r = await client.post(
+        f"/lists/{list_id}/tasks", json={"title": "x", "duration_min": 0}
     )
     assert r.status_code == 422
 

@@ -77,9 +77,9 @@ async def create_task(
     parent_id: str | None = None,
     due=None,
     duration_min: int = 60,
-    weight: float = 0.5,
     priority: int = 3,
     deadline=None,
+    location: str | None = None,
 ) -> Task:
     await _ensure_list(db, user_id, list_id)
 
@@ -110,9 +110,9 @@ async def create_task(
         completed=False,
         due=due,
         duration_min=duration_min,
-        weight=weight,
         priority=priority,
         deadline=deadline,
+        location=location,
     )
     db.add(task)
     await db.flush()
@@ -132,9 +132,9 @@ async def update_task(
         "parent_id",
         "due",
         "duration_min",
-        "weight",
         "priority",
         "deadline",
+        "location",
     }
     for key, value in fields.items():
         if key not in allowed or value is None:
