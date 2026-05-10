@@ -227,7 +227,7 @@ async def _update_scheduled_event_ids(
 async def _clear_scheduled_event_ids_for_app_events(
     db: AsyncSession, user_id: str, deleted_event_ids: set[str]
 ) -> None:
-    """Clear scheduled_event_id on tasks whose stored event_id was just deleted."""
+    """Clear scheduled_* on tasks whose stored event_id was just deleted."""
     if not deleted_event_ids:
         return
     rows = (
@@ -240,6 +240,9 @@ async def _clear_scheduled_event_ids_for_app_events(
     ).scalars().all()
     for task in rows:
         task.scheduled_event_id = None
+        task.scheduled_start = None
+        task.scheduled_end = None
+        task.scheduled_fragments = None
     await db.flush()
 
 

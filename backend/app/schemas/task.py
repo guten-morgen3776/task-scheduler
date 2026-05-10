@@ -36,6 +36,11 @@ class TaskMove(BaseModel):
     position: str | None = None
 
 
+class ScheduledFragment(BaseModel):
+    start: datetime
+    end: datetime
+
+
 class TaskRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -55,6 +60,7 @@ class TaskRead(BaseModel):
     scheduled_event_id: str | None
     scheduled_start: datetime | None
     scheduled_end: datetime | None
+    scheduled_fragments: list[ScheduledFragment] | None
     created_at: datetime
     updated_at: datetime
 

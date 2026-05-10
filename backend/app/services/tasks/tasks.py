@@ -47,6 +47,133 @@ async def list_tasks(
     return list((await db.execute(stmt)).scalars().all())
 
 
+async def list_scheduled_tasks(
+    db: AsyncSession,
+    user_id: str,
+    *,
+    start=None,
+    end=None,
+) -> list[Task]:
+    """Tasks with a scheduled placement, optionally filtered by [start, end].
+
+    Filtering is done on `scheduled_start`. Tasks without a placement are
+    omitted. Completed tasks are included so the UI can show them as done.
+    """
+    stmt = (
+        select(Task)
+        .where(Task.user_id == user_id, Task.scheduled_start.is_not(None))
+        .order_by(Task.scheduled_start)
+    )
+    if start is not None:
+        stmt = stmt.where(Task.scheduled_start >= start)
+    if end is not None:
+        stmt = stmt.where(Task.scheduled_start < end)
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def sync_scheduled_from_calendar(
+    db: AsyncSession,
+    user_id: str,
+    calendar_events: list,
+) -> tuple[int, int]:
+    """Reconcile tasks.scheduled_* fields from an authoritative list of
+    app-marked Google Calendar events.
+
+    `calendar_events` is the raw events.list() output, each dict carrying
+    extendedProperties.private.task_id / fragment_index.
+
+    For each task referenced by events:
+      - scheduled_event_id = id of the fragment_index=0 event (or earliest)
+      - scheduled_start    = min(event.start)
+      - scheduled_end      = max(event.end)
+
+    Tasks with a scheduled_event_id no longer present on the calendar have
+    their scheduled_* fields cleared (the user deleted the event manually).
+
+    Returns (updated_count, cleared_count).
+    """
+    from datetime import UTC, datetime
+
+    # Group events by task_id.
+    by_task: dict[str, list[dict]] = {}
+    for ev in calendar_events:
+        private = (ev.get("extendedProperties") or {}).get("private") or {}
+        task_id = private.get("task_id")
+        if not task_id:
+            continue
+        by_task.setdefault(task_id, []).append(ev)
+
+    def _parse_dt(payload: dict) -> datetime:
+        from dateutil import parser as date_parser
+        raw = payload.get("dateTime") or payload.get("date")
+        dt = date_parser.isoparse(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC)
+
+    updated = 0
+    referenced_event_ids: set[str] = set()
+    for task_id, events in by_task.items():
+        # Pick the "primary" event: fragment_index=0 if present, else earliest start.
+        events_sorted = sorted(events, key=lambda e: _parse_dt(e["start"]))
+        primary = next(
+            (
+                e
+                for e in events_sorted
+                if (e.get("extendedProperties") or {}).get("private", {}).get(
+                    "fragment_index"
+                )
+                == "0"
+            ),
+            events_sorted[0],
+        )
+        frag_records = [
+            {
+                "start": _parse_dt(e["start"]).isoformat(),
+                "end": _parse_dt(e["end"]).isoformat(),
+            }
+            for e in events_sorted
+        ]
+        scheduled_start = datetime.fromisoformat(frag_records[0]["start"])
+        scheduled_end = datetime.fromisoformat(frag_records[-1]["end"])
+
+        task = (
+            await db.execute(
+                select(Task).where(Task.id == task_id, Task.user_id == user_id)
+            )
+        ).scalar_one_or_none()
+        if task is None:
+            continue
+        task.scheduled_event_id = primary["id"]
+        task.scheduled_start = scheduled_start
+        task.scheduled_end = scheduled_end
+        task.scheduled_fragments = frag_records
+        updated += 1
+        for e in events:
+            referenced_event_ids.add(e["id"])
+
+    # Clear scheduled_* for tasks whose stored event_id is not on the calendar.
+    cleared = 0
+    rows = (
+        await db.execute(
+            select(Task).where(
+                Task.user_id == user_id,
+                Task.scheduled_event_id.is_not(None),
+            )
+        )
+    ).scalars().all()
+    for t in rows:
+        if t.scheduled_event_id not in referenced_event_ids:
+            t.scheduled_event_id = None
+            t.scheduled_start = None
+            t.scheduled_end = None
+            t.scheduled_fragments = None
+            cleared += 1
+
+    await db.flush()
+    return updated, cleared
+
+
 async def get_task(db: AsyncSession, user_id: str, task_id: str) -> Task:
     row = (
         await db.execute(select(Task).where(Task.id == task_id, Task.user_id == user_id))

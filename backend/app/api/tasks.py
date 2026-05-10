@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,6 +12,9 @@ from app.schemas.task import (
     TaskReadWithSubtasks,
     TaskUpdate,
 )
+from app.services.google import calendar as calendar_service
+from app.services.google import oauth as oauth_service
+from app.services.optimizer import writer as optimizer_writer
 from app.services.tasks import tasks as tasks_service
 
 list_scoped_router = APIRouter(prefix="/lists/{list_id}/tasks", tags=["tasks"])
@@ -79,6 +84,91 @@ async def create_task_in_list(
     except tasks_service.InvalidParent as e:
         raise _invalid_parent(str(e)) from e
     return TaskRead.model_validate(row)
+
+
+@task_router.get("/scheduled", response_model=list[TaskRead])
+async def list_scheduled_tasks_endpoint(
+    start: datetime | None = Query(None),
+    end: datetime | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> list[TaskRead]:
+    """Return tasks with `scheduled_start` set, ordered chronologically.
+
+    Optional `start` / `end` (TZ-aware ISO 8601) filter the placement window.
+    """
+    if start is not None and start.tzinfo is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "validation_error", "message": "start must include a timezone"},
+        )
+    if end is not None and end.tzinfo is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "validation_error", "message": "end must include a timezone"},
+        )
+    rows = await tasks_service.list_scheduled_tasks(
+        db, user.id, start=start, end=end
+    )
+    return [TaskRead.model_validate(r) for r in rows]
+
+
+@task_router.post("/sync-from-calendar")
+async def sync_from_calendar_endpoint(
+    target_calendar_id: str = "primary",
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """Re-read app-marked events from Google Calendar and rewrite each task's
+    scheduled_start / scheduled_end / scheduled_event_id from the truth there.
+
+    Tasks whose stored event_id no longer exists on the calendar are cleared.
+    """
+    import asyncio
+
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+
+    try:
+        creds = await oauth_service.load_credentials(db, user.id)
+    except oauth_service.NotAuthenticatedError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error": "not_authenticated", "message": str(e)},
+        ) from e
+    except oauth_service.ReauthRequiredError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error": "reauth_required", "message": str(e)},
+        ) from e
+
+    def _fetch() -> list[dict]:
+        service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+        return optimizer_writer._list_app_events_sync(
+            service, target_calendar_id, snapshot_id=None
+        )
+
+    try:
+        events = await asyncio.get_running_loop().run_in_executor(None, _fetch)
+    except HttpError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"error": "calendar_api_error", "message": str(e)},
+        ) from e
+    except calendar_service.CalendarApiError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"error": "calendar_api_error", "message": str(e)},
+        ) from e
+
+    updated, cleared = await tasks_service.sync_scheduled_from_calendar(
+        db, user.id, events
+    )
+    return {
+        "updated_task_count": updated,
+        "cleared_task_count": cleared,
+        "event_count": len(events),
+    }
 
 
 @task_router.get("/{task_id}", response_model=TaskReadWithSubtasks)

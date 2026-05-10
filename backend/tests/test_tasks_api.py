@@ -141,3 +141,289 @@ async def test_list_count_aggregation(client: AsyncClient) -> None:
     counts = r.json()[0]
     assert counts["task_count"] == 2
     assert counts["completed_count"] == 1
+
+
+async def test_list_scheduled_tasks(client: AsyncClient, db_session, test_user) -> None:
+    """tasks.scheduled_start で絞り込みできることを確認。"""
+    from datetime import UTC, datetime
+    from app.models import Task, TaskList
+
+    list_row = TaskList(user_id=test_user.id, title="x", position="000010")
+    db_session.add(list_row)
+    await db_session.flush()
+
+    placed_in_range = Task(
+        user_id=test_user.id,
+        list_id=list_row.id,
+        title="A",
+        position="000010",
+        duration_min=60,
+        scheduled_start=datetime(2026, 5, 12, 3, 0, tzinfo=UTC),
+        scheduled_end=datetime(2026, 5, 12, 4, 0, tzinfo=UTC),
+    )
+    placed_outside = Task(
+        user_id=test_user.id,
+        list_id=list_row.id,
+        title="B",
+        position="000020",
+        duration_min=60,
+        scheduled_start=datetime(2026, 6, 1, 3, 0, tzinfo=UTC),
+        scheduled_end=datetime(2026, 6, 1, 4, 0, tzinfo=UTC),
+    )
+    unplaced = Task(
+        user_id=test_user.id,
+        list_id=list_row.id,
+        title="C",
+        position="000030",
+        duration_min=60,
+    )
+    db_session.add_all([placed_in_range, placed_outside, unplaced])
+    await db_session.commit()
+
+    r = await client.get(
+        "/tasks/scheduled?start=2026-05-10T00:00:00%2B00:00&end=2026-05-15T00:00:00%2B00:00"
+    )
+    assert r.status_code == 200, r.text
+    titles = [t["title"] for t in r.json()]
+    assert titles == ["A"]
+
+    # No range = everything with a placement.
+    r = await client.get("/tasks/scheduled")
+    titles = [t["title"] for t in r.json()]
+    assert set(titles) == {"A", "B"}
+
+
+async def test_scheduled_endpoint_rejects_naive_datetime(client: AsyncClient) -> None:
+    r = await client.get("/tasks/scheduled?start=2026-05-10T00:00:00")
+    assert r.status_code == 400
+    assert r.json()["detail"]["error"] == "validation_error"
+
+
+async def test_sync_from_calendar_updates_db(
+    client: AsyncClient, db_session, test_user
+) -> None:
+    """app マーカー付き events を読んで tasks.scheduled_* を埋める。"""
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock, patch
+    from app.models import Task, TaskList
+    from app.services.optimizer import writer as optimizer_writer
+    from app.services.tasks import tasks as tasks_service
+
+    list_row = TaskList(user_id=test_user.id, title="x", position="000010")
+    db_session.add(list_row)
+    await db_session.flush()
+    list_id = list_row.id
+
+    a = Task(
+        user_id=test_user.id,
+        list_id=list_id,
+        title="A",
+        position="000010",
+        duration_min=60,
+        # No scheduled_* yet — should be filled by sync.
+    )
+    stale = Task(
+        user_id=test_user.id,
+        list_id=list_id,
+        title="stale",
+        position="000020",
+        duration_min=60,
+        scheduled_event_id="ghost_event",
+        scheduled_start=datetime(2026, 5, 1, 0, 0, tzinfo=UTC),
+        scheduled_end=datetime(2026, 5, 1, 1, 0, tzinfo=UTC),
+    )
+    db_session.add_all([a, stale])
+    await db_session.commit()
+
+    fake_events = [
+        {
+            "id": "ev_001",
+            "start": {"dateTime": "2026-05-12T03:00:00+00:00"},
+            "end": {"dateTime": "2026-05-12T04:00:00+00:00"},
+            "extendedProperties": {
+                "private": {
+                    "task_scheduler": "1",
+                    "task_id": a.id,
+                    "fragment_index": "0",
+                }
+            },
+        },
+    ]
+
+    with (
+        patch.object(optimizer_writer.oauth_service, "load_credentials") as load_creds,
+        patch.object(optimizer_writer, "_list_app_events_sync", return_value=fake_events),
+        patch("app.api.tasks.build", create=True),
+    ):
+        load_creds.return_value = MagicMock()
+        # Patch oauth_service in tasks API context too
+        with patch("app.api.tasks.oauth_service.load_credentials", return_value=MagicMock()):
+            r = await client.post("/tasks/sync-from-calendar")
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["updated_task_count"] == 1
+    assert body["cleared_task_count"] == 1
+    assert body["event_count"] == 1
+
+    # Pull fresh state via service (avoids stale ORM cache concerns).
+    rows = await tasks_service.list_scheduled_tasks(db_session, test_user.id)
+    titles_with_placement = {t.title for t in rows}
+    assert titles_with_placement == {"A"}
+    fresh_a = next(t for t in rows if t.title == "A")
+    assert fresh_a.scheduled_event_id == "ev_001"
+    assert fresh_a.scheduled_start == datetime(2026, 5, 12, 3, 0, tzinfo=UTC)
+
+
+async def test_apply_populates_scheduled_fragments(
+    client: AsyncClient, db_session, test_user
+) -> None:
+    """apply は複数 fragments をそのまま scheduled_fragments に保存する。"""
+    from datetime import UTC, datetime, timedelta
+    from app.models import OptimizerSnapshot, Task, TaskList
+
+    list_row = TaskList(user_id=test_user.id, title="x", position="000010")
+    db_session.add(list_row)
+    await db_session.flush()
+
+    task = Task(
+        user_id=test_user.id,
+        list_id=list_row.id,
+        title="multi",
+        position="000010",
+        duration_min=120,
+    )
+    db_session.add(task)
+    await db_session.flush()
+
+    f1_start = datetime(2026, 5, 10, 11, 0, tzinfo=UTC)
+    f2_start = datetime(2026, 5, 10, 17, 0, tzinfo=UTC)
+    snap = OptimizerSnapshot(
+        user_id=test_user.id,
+        tasks_json=[{"id": task.id, "title": "multi"}],
+        slots_json=[],
+        config_json={},
+        result_json={
+            "status": "optimal",
+            "objective_value": 0.0,
+            "assignments": [
+                {
+                    "task_id": task.id,
+                    "fragments": [
+                        {"slot_id": "s1", "start": f1_start.isoformat(), "duration_min": 60},
+                        {"slot_id": "s2", "start": f2_start.isoformat(), "duration_min": 120},
+                    ],
+                    "total_assigned_min": 180,
+                }
+            ],
+            "unassigned_task_ids": [],
+            "solve_time_sec": 0.0,
+            "notes": [],
+        },
+    )
+    db_session.add(snap)
+    await db_session.commit()
+
+    r = await client.post(f"/optimizer/snapshots/{snap.id}/apply")
+    assert r.status_code == 200, r.text
+    assert r.json()["updated_task_count"] == 1
+
+    r = await client.get(f"/tasks/{task.id}")
+    body = r.json()
+    frags = body["scheduled_fragments"]
+    assert frags is not None
+    assert len(frags) == 2
+    # Sorted by start, with end derived from duration_min.
+    assert datetime.fromisoformat(frags[0]["start"]) == f1_start
+    assert (
+        datetime.fromisoformat(frags[0]["end"])
+        == f1_start + timedelta(minutes=60)
+    )
+    assert datetime.fromisoformat(frags[1]["start"]) == f2_start
+    assert (
+        datetime.fromisoformat(frags[1]["end"])
+        == f2_start + timedelta(minutes=120)
+    )
+    # scheduled_start / end span the whole.
+    assert datetime.fromisoformat(body["scheduled_start"]) == f1_start
+    assert (
+        datetime.fromisoformat(body["scheduled_end"])
+        == f2_start + timedelta(minutes=120)
+    )
+
+
+async def test_sync_from_calendar_populates_fragments(
+    client: AsyncClient, db_session, test_user
+) -> None:
+    """同期も複数 events を fragments としてまとめて保存する。"""
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock, patch
+    from app.models import Task, TaskList
+    from app.services.optimizer import writer as optimizer_writer
+    from app.services.tasks import tasks as tasks_service
+
+    list_row = TaskList(user_id=test_user.id, title="x", position="000010")
+    db_session.add(list_row)
+    await db_session.flush()
+
+    task = Task(
+        user_id=test_user.id,
+        list_id=list_row.id,
+        title="A",
+        position="000010",
+        duration_min=120,
+    )
+    db_session.add(task)
+    await db_session.commit()
+
+    fake_events = [
+        {
+            "id": "ev_001",
+            "start": {"dateTime": "2026-05-10T11:00:00+00:00"},
+            "end": {"dateTime": "2026-05-10T12:00:00+00:00"},
+            "extendedProperties": {
+                "private": {
+                    "task_scheduler": "1",
+                    "task_id": task.id,
+                    "fragment_index": "0",
+                }
+            },
+        },
+        {
+            "id": "ev_002",
+            "start": {"dateTime": "2026-05-10T17:00:00+00:00"},
+            "end": {"dateTime": "2026-05-10T19:00:00+00:00"},
+            "extendedProperties": {
+                "private": {
+                    "task_scheduler": "1",
+                    "task_id": task.id,
+                    "fragment_index": "1",
+                }
+            },
+        },
+    ]
+
+    with (
+        patch.object(optimizer_writer.oauth_service, "load_credentials") as load_creds,
+        patch.object(optimizer_writer, "_list_app_events_sync", return_value=fake_events),
+        patch("app.api.tasks.build", create=True),
+    ):
+        load_creds.return_value = MagicMock()
+        with patch("app.api.tasks.oauth_service.load_credentials", return_value=MagicMock()):
+            r = await client.post("/tasks/sync-from-calendar")
+
+    assert r.status_code == 200, r.text
+    rows = await tasks_service.list_scheduled_tasks(db_session, test_user.id)
+    assert len(rows) == 1
+    fresh = rows[0]
+    assert fresh.scheduled_fragments is not None
+    assert len(fresh.scheduled_fragments) == 2
+    # Ordered chronologically.
+    assert datetime.fromisoformat(fresh.scheduled_fragments[0]["start"]) == datetime(
+        2026, 5, 10, 11, 0, tzinfo=UTC
+    )
+    assert datetime.fromisoformat(fresh.scheduled_fragments[1]["start"]) == datetime(
+        2026, 5, 10, 17, 0, tzinfo=UTC
+    )
+    # scheduled_event_id is the fragment_index=0 event.
+    assert fresh.scheduled_event_id == "ev_001"

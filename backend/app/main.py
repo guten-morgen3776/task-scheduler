@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.auth import router as auth_router
 from app.api.calendar import router as calendar_router
@@ -8,8 +9,18 @@ from app.api.settings import router as settings_router
 from app.api.slots import router as slots_router
 from app.api.tasks import list_scoped_router as task_list_scoped_router
 from app.api.tasks import task_router
+from app.core.config import get_settings
 
 app = FastAPI(title="task-scheduler", version="0.3.0")
+
+if get_settings().app_env == "dev":
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:5173"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 
 @app.get("/health")

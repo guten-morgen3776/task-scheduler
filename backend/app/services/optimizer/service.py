@@ -233,14 +233,16 @@ async def apply_snapshot_to_tasks(
         fragments = assignment.get("fragments") or []
         if not fragments:
             continue
-        starts = [datetime.fromisoformat(f["start"]) for f in fragments]
-        ends = [
-            datetime.fromisoformat(f["start"])
-            + _timedelta_min(f["duration_min"])
-            for f in fragments
-        ]
-        scheduled_start = min(starts)
-        scheduled_end = max(ends)
+        frag_records: list[dict] = []
+        for f in fragments:
+            start = datetime.fromisoformat(f["start"])
+            end = start + _timedelta_min(f["duration_min"])
+            frag_records.append(
+                {"start": start.isoformat(), "end": end.isoformat()}
+            )
+        frag_records.sort(key=lambda x: x["start"])
+        scheduled_start = datetime.fromisoformat(frag_records[0]["start"])
+        scheduled_end = datetime.fromisoformat(frag_records[-1]["end"])
 
         task = (
             await db.execute(
@@ -251,6 +253,7 @@ async def apply_snapshot_to_tasks(
             continue
         task.scheduled_start = scheduled_start
         task.scheduled_end = scheduled_end
+        task.scheduled_fragments = frag_records
         updated += 1
     await db.flush()
     return updated

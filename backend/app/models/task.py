@@ -1,6 +1,9 @@
 from datetime import datetime
 
+from typing import Any
+
 from sqlalchemy import (
+    JSON,
     Boolean,
     CheckConstraint,
     ForeignKey,
@@ -51,6 +54,11 @@ class Task(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     scheduled_event_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     scheduled_start: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     scheduled_end: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    # List of {"start": iso, "end": iso} per fragment when the task is split
+    # across multiple slots. None or empty when not yet placed.
+    scheduled_fragments: Mapped[list[dict[str, Any]] | None] = mapped_column(
+        JSON, nullable=True
+    )
 
     __table_args__ = (
         CheckConstraint("priority >= 1 AND priority <= 5", name="ck_tasks_priority_range"),
