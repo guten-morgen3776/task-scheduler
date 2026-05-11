@@ -189,3 +189,129 @@ curl -X POST http://localhost:47823/optimizer/snapshots/<id>/replay \
 cd backend
 uv run pytest -v
 ```
+
+---
+
+## 本番デプロイ (Phase 7)
+
+> 詳細: [docs/phase7_design.md](docs/phase7_design.md)
+> ローカル運用のままで構わない場合はこのセクションは無視して OK。
+
+スマホから 24/365 でアクセスできるようにする手順。Mac を起動していなくても使えるのが目的。
+
+### 構成
+
+- **バックエンド**: Fly.io（無料枠、Tokyo リージョン）
+  - SQLite を Fly Volume `/mnt/data` に永続化
+  - 起動時に `alembic upgrade head`
+- **フロント**: Cloudflare Pages（無料）
+  - GitHub push で自動デプロイ
+  - PWA 対応（`vite-plugin-pwa`）— スマホのホーム画面に追加可能
+
+> 順序が大事: **Fly のアプリ名（= 本番 URL）を先に予約 → Google Cloud Console に redirect URI を登録**、の流れ。URL が決まらないと OAuth クライアントを作れない。
+
+### 1. Fly.io でアプリ名だけ予約
+
+```bash
+brew install flyctl
+flyctl auth signup       # or signin
+cd backend
+flyctl launch --no-deploy
+# 対話形式：
+#   - App name: 例 `aoki-task-scheduler`（fly.dev サブドメインになる）
+#   - Region:   nrt (Tokyo)
+#   - Deploy now? No
+```
+
+この時点で `https://<選んだ名前>.fly.dev` が予約される。サーバーはまだ動いていない。
+
+### 2. Cloudflare Pages のプロジェクト名を決める
+
+GitHub に push しておく（未だなら）:
+
+```bash
+git push -u origin main
+```
+
+Cloudflare Dashboard → Pages → Connect to Git → リポジトリ選択 → Project name を設定（例: `task-scheduler`）。`https://task-scheduler.pages.dev` が予約される。最初のビルドは失敗してもよい（後で `VITE_API_BASE` を設定して再ビルドする）。
+
+### 3. Google Cloud Console — Web 種別の OAuth クライアント
+
+ローカル用とは別に「ウェブアプリケーション」種別のクライアントを発行:
+
+1. 認証情報 → 「OAuth 2.0 クライアント ID を作成」 → 種類: **ウェブアプリケーション**
+2. 承認済みのリダイレクト URI に以下を **すべて** 登録:
+   - `https://<上で決めた fly 名>.fly.dev/auth/google/callback`
+   - `http://localhost:47823/auth/google/callback` （ローカルでも Web Flow を試したい場合）
+3. JSON をダウンロード（本番用 credentials.json）
+
+### 4. Fly Volume と Secrets 設定 + deploy
+
+```bash
+cd backend
+
+# 永続ボリューム作成（SQLite 用）
+flyctl volumes create task_scheduler_data --region nrt --size 1
+
+# Secrets 設定
+flyctl secrets set \
+  TOKEN_ENCRYPTION_KEY="$(grep TOKEN_ENCRYPTION_KEY .env | cut -d= -f2)" \
+  GOOGLE_CREDENTIALS_PATH="/mnt/data/credentials.json" \
+  PUBLIC_BACKEND_URL="https://<your-fly-app>.fly.dev" \
+  PUBLIC_FRONTEND_URL="https://<your-pages-app>.pages.dev"
+
+# credentials.json (Web 種別) と既存 app.db を volume に転送
+flyctl ssh sftp shell
+# put secrets/credentials.json /mnt/data/credentials.json
+# put data/app.db /mnt/data/app.db
+# bye
+
+# デプロイ
+flyctl deploy
+flyctl status        # ヘルスチェック
+curl https://<your-fly-app>.fly.dev/health
+```
+
+### 5. Cloudflare Pages の build 設定を埋めて再デプロイ
+
+Step 2 で接続済みの Pages プロジェクトに設定を入れる:
+
+1. Settings → Builds & deployments:
+   - **Build command**: `cd frontend && pnpm install && pnpm build`
+   - **Build output**: `frontend/dist`
+   - **Root directory**: `/`
+2. Settings → Environment variables:
+   - `VITE_API_BASE` = `https://<your-fly-app>.fly.dev`
+3. Deployments → Retry build (or push to main)
+
+`https://<your-pages-app>.pages.dev` にアクセス → Google でログイン → 動作確認。
+
+### 6. スマホで使う（PWA）
+
+- iOS Safari: Pages の URL を開く → 共有ボタン → 「ホーム画面に追加」
+- Android Chrome: URL を開くと「インストール」プロンプトが出る
+
+ホーム画面アイコンから起動すれば全画面で動作。
+
+### 完了判定
+
+- [ ] `https://<fly-app>.fly.dev/health` が 200
+- [ ] Cloudflare Pages の URL で Google ログイン → 認可画面 → リダイレクト → ホームに着く
+- [ ] スマホで開いてタスク追加・最適化・カレンダー書き込みが完走
+- [ ] Mac を sleep / 終了させてもスマホから引き続き使える
+- [ ] ホーム画面に追加してアプリっぽく開ける
+
+### 設定 cheat sheet
+
+| 環境 | DATABASE_URL | TOKEN_ENCRYPTION_KEY | GOOGLE_CREDENTIALS_PATH | PUBLIC_BACKEND_URL | PUBLIC_FRONTEND_URL |
+|---|---|---|---|---|---|
+| local dev | `sqlite+aiosqlite:///./data/app.db` | `.env` | `./secrets/credentials.json` (Desktop 種別) | `http://localhost:47823` | `http://localhost:47824` |
+| Fly.io prod | `sqlite+aiosqlite:////mnt/data/app.db` | Fly secrets | `/mnt/data/credentials.json` (Web 種別) | `https://<fly>.fly.dev` | `https://<pages>.pages.dev` |
+
+### 行動ログ
+
+[docs/phase7_design.md §3.4](docs/phase7_design.md) の通り、各操作は `event_log` テーブルに追記されます（読出 UI なし、将来の解析向け）。手動で覗くなら:
+
+```bash
+flyctl ssh console -C "sqlite3 /mnt/data/app.db 'SELECT event_type, occurred_at, payload FROM event_log ORDER BY id DESC LIMIT 20'"
+```

@@ -12,6 +12,7 @@ from app.schemas.task import (
     TaskReadWithSubtasks,
     TaskUpdate,
 )
+from app.services.event_log import record as record_event
 from app.services.google import calendar as calendar_service
 from app.services.google import oauth as oauth_service
 from app.services.optimizer import writer as optimizer_writer
@@ -83,6 +84,18 @@ async def create_task_in_list(
         raise _list_not_found() from e
     except tasks_service.InvalidParent as e:
         raise _invalid_parent(str(e)) from e
+    await record_event(
+        db, user.id, "task.created",
+        subject_type="task", subject_id=row.id,
+        payload={
+            "title": row.title,
+            "list_id": row.list_id,
+            "duration_min": row.duration_min,
+            "priority": row.priority,
+            "deadline": row.deadline.isoformat() if row.deadline else None,
+            "location": row.location,
+        },
+    )
     return TaskRead.model_validate(row)
 
 
@@ -167,6 +180,14 @@ async def sync_from_calendar_endpoint(
     updated, cleared = await tasks_service.sync_scheduled_from_calendar(
         db, user.id, events
     )
+    await record_event(
+        db, user.id, "task.synced_from_calendar",
+        payload={
+            "updated_task_count": updated,
+            "cleared_task_count": cleared,
+            "event_count": len(events),
+        },
+    )
     return {
         "updated_task_count": updated,
         "cleared_task_count": cleared,
@@ -198,15 +219,43 @@ async def update_task_endpoint(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> TaskRead:
+    # Capture the "before" state so the event log can record what changed.
     try:
-        row = await tasks_service.update_task(
-            db, user.id, task_id, **payload.model_dump(exclude_unset=True)
-        )
+        before_obj = await tasks_service.get_task(db, user.id, task_id)
+    except tasks_service.TaskNotFound as e:
+        raise _not_found() from e
+    patch = payload.model_dump(exclude_unset=True)
+    before_snapshot = {
+        k: _serialize_field(getattr(before_obj, k, None)) for k in patch.keys()
+    }
+    try:
+        row = await tasks_service.update_task(db, user.id, task_id, **patch)
     except tasks_service.TaskNotFound as e:
         raise _not_found() from e
     except tasks_service.InvalidParent as e:
         raise _invalid_parent(str(e)) from e
+    after_snapshot = {
+        k: _serialize_field(getattr(row, k, None)) for k in patch.keys()
+    }
+    diff = {
+        k: {"before": before_snapshot[k], "after": after_snapshot[k]}
+        for k in patch.keys()
+        if before_snapshot[k] != after_snapshot[k]
+    }
+    if diff:
+        await record_event(
+            db, user.id, "task.updated",
+            subject_type="task", subject_id=row.id,
+            payload={"changes": diff},
+        )
     return TaskRead.model_validate(row)
+
+
+def _serialize_field(v):
+    """Convert ORM field values to JSON-safe representations."""
+    if isinstance(v, datetime):
+        return v.isoformat()
+    return v
 
 
 @task_router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -219,6 +268,9 @@ async def delete_task_endpoint(
         await tasks_service.delete_task(db, user.id, task_id)
     except tasks_service.TaskNotFound as e:
         raise _not_found() from e
+    await record_event(
+        db, user.id, "task.deleted", subject_type="task", subject_id=task_id
+    )
 
 
 @task_router.post("/{task_id}/complete", response_model=TaskRead)
@@ -231,6 +283,18 @@ async def complete_task_endpoint(
         row = await tasks_service.complete_task(db, user.id, task_id)
     except tasks_service.TaskNotFound as e:
         raise _not_found() from e
+    await record_event(
+        db, user.id, "task.completed",
+        subject_type="task", subject_id=row.id,
+        payload={
+            "duration_min": row.duration_min,
+            "scheduled_start": row.scheduled_start.isoformat() if row.scheduled_start else None,
+            "scheduled_end": row.scheduled_end.isoformat() if row.scheduled_end else None,
+            "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+            "priority": row.priority,
+            "location": row.location,
+        },
+    )
     return TaskRead.model_validate(row)
 
 
@@ -244,6 +308,10 @@ async def uncomplete_task_endpoint(
         row = await tasks_service.uncomplete_task(db, user.id, task_id)
     except tasks_service.TaskNotFound as e:
         raise _not_found() from e
+    await record_event(
+        db, user.id, "task.uncompleted",
+        subject_type="task", subject_id=row.id,
+    )
     return TaskRead.model_validate(row)
 
 
@@ -262,4 +330,9 @@ async def move_task_endpoint(
         raise _not_found() from e
     except tasks_service.ListNotFound as e:
         raise _list_not_found() from e
+    await record_event(
+        db, user.id, "task.moved",
+        subject_type="task", subject_id=row.id,
+        payload={"list_id": row.list_id, "position": row.position},
+    )
     return TaskRead.model_validate(row)

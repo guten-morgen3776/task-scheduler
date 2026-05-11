@@ -17,6 +17,7 @@ from app.schemas.optimizer import (
     WriteResponse,
     WrittenEventRead,
 )
+from app.services.event_log import record as record_event
 from app.services.google import calendar as calendar_service
 from app.services.google import oauth as oauth_service
 from app.services.optimizer import service as optimizer_service
@@ -128,6 +129,22 @@ async def optimize(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail={"error": "calendar_api_error", "message": str(e)},
         ) from e
+    await record_event(
+        db, user.id, "optimize.ran",
+        subject_type="snapshot", subject_id=snapshot_id,
+        payload={
+            "status": result.status,
+            "objective_value": result.objective_value,
+            "solve_time_sec": result.solve_time_sec,
+            "assigned_count": len(result.assignments),
+            "unassigned_count": len(result.unassigned_task_ids),
+            "config_overrides": (
+                payload.config_overrides.model_dump(exclude_unset=True)
+                if payload.config_overrides
+                else None
+            ),
+        },
+    )
     return await _build_response(db, user.id, result, snapshot_id)
 
 
@@ -230,6 +247,11 @@ async def apply_snapshot(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"error": "not_found", "message": str(e)},
         ) from e
+    await record_event(
+        db, user.id, "snapshot.applied",
+        subject_type="snapshot", subject_id=snapshot_id,
+        payload={"updated_task_count": updated},
+    )
     return {"updated_task_count": updated, "snapshot_id": snapshot_id}
 
 
@@ -274,6 +296,16 @@ async def write_snapshot_to_calendar(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail={"error": "calendar_api_error", "message": str(e)},
         ) from e
+    await record_event(
+        db, user.id, "snapshot.written",
+        subject_type="snapshot", subject_id=result.snapshot_id,
+        payload={
+            "dry_run": result.dry_run,
+            "target_calendar_id": result.target_calendar_id,
+            "deleted_event_count": result.deleted_event_count,
+            "created_event_count": len(result.created_events),
+        },
+    )
     return WriteResponse(
         snapshot_id=result.snapshot_id,
         dry_run=result.dry_run,
@@ -331,6 +363,16 @@ async def delete_snapshot_calendar_events(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail={"error": "calendar_api_error", "message": str(e)},
         ) from e
+    await record_event(
+        db, user.id, "snapshot.write_deleted",
+        subject_type="snapshot",
+        subject_id=snapshot_id if only_this_snapshot else None,
+        payload={
+            "deleted_event_count": deleted,
+            "target_calendar_id": target_calendar_id,
+            "only_this_snapshot": only_this_snapshot,
+        },
+    )
     return DeleteWriteResponse(
         deleted_event_count=deleted, target_calendar_id=target_calendar_id
     )

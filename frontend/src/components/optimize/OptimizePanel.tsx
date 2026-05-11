@@ -9,8 +9,11 @@ import { Button, Card, ErrorBanner, Input, Label } from "../ui";
 import { ResultPreview } from "./ResultPreview";
 
 export function OptimizePanel({ activeListId }: { activeListId: string }) {
+  // Default range: from "now" (browser local time = JST for our user) up to
+  // end-of-day 7 days later. `useMemo([])` re-evaluates on mount only, so a
+  // page reload refreshes the start time but in-session edits stick.
   const today = useMemo(() => new Date(), []);
-  const initialStart = toLocalInput(startOfDay(today));
+  const initialStart = toLocalInput(today);
   const initialEnd = toLocalInput(endOfDay(addDays(today, 7)));
 
   const [start, setStart] = useState(initialStart);
@@ -152,11 +155,6 @@ export function OptimizePanel({ activeListId }: { activeListId: string }) {
 function toLocalInput(d: Date): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-function startOfDay(d: Date): Date {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  return x;
 }
 function endOfDay(d: Date): Date {
   const x = new Date(d);

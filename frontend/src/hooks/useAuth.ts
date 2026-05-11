@@ -21,6 +21,18 @@ export function useStartLogin() {
   });
 }
 
+export function useStartWebLogin() {
+  return useMutation({
+    mutationFn: authApi.startGoogleWebFlow,
+    onSuccess: (data) => {
+      // Full-page navigation to Google's consent screen. After authorization
+      // Google redirects back to the backend callback, which then redirects
+      // to the configured frontend URL — at which point useAuthMe refetches.
+      window.location.href = data.authorize_url;
+    },
+  });
+}
+
 export function useLogout() {
   const qc = useQueryClient();
   return useMutation({

@@ -27,6 +27,12 @@ class Settings(BaseSettings):
 
     app_timezone: str = "Asia/Tokyo"
 
+    # Public URLs used by the OAuth Web Flow redirect and CORS config.
+    # In dev these match the local servers; in prod they should point at the
+    # Fly.io / Cloudflare Pages domains via env.
+    public_backend_url: str = "http://localhost:47823"
+    public_frontend_url: str = "http://localhost:47824"
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

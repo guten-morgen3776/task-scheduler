@@ -13,17 +13,20 @@ from app.core.config import get_settings
 
 app = FastAPI(title="task-scheduler", version="0.3.0")
 
-if get_settings().app_env == "dev":
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[
-            "http://localhost:47824",
-            "http://localhost:5173",  # Vite default — kept for ad-hoc use.
-        ],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+_settings = get_settings()
+_cors_origins: list[str] = [_settings.public_frontend_url]
+if _settings.app_env == "dev":
+    # Allow both the configured frontend URL and Vite's default port for ad-hoc use.
+    _cors_origins.extend(["http://localhost:47824", "http://localhost:5173"])
+# Dedupe while preserving order.
+_cors_origins = list(dict.fromkeys(_cors_origins))
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health")

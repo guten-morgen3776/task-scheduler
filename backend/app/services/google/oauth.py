@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google_auth_oauthlib.flow import Flow, InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from sqlalchemy import select
@@ -40,6 +40,69 @@ def _credentials_to_dict(creds: Credentials) -> dict:
         "scopes": creds.scopes,
         "expiry": creds.expiry,
     }
+
+
+def _web_redirect_uri() -> str:
+    settings = get_settings()
+    return f"{settings.public_backend_url.rstrip('/')}/auth/google/callback"
+
+
+def _make_web_flow() -> Flow:
+    """Build a Flow configured for the standard server-side redirect dance.
+
+    The redirect_uri must match what's registered in the Google Cloud
+    Console "Web application" OAuth client.
+    """
+    settings = get_settings()
+    return Flow.from_client_secrets_file(
+        str(settings.google_credentials_path),
+        scopes=settings.google_oauth_scopes,
+        redirect_uri=_web_redirect_uri(),
+    )
+
+
+def build_web_authorization_url() -> str:
+    """Return the Google authorization URL the frontend should navigate to."""
+    flow = _make_web_flow()
+    auth_url, _state = flow.authorization_url(
+        access_type="offline",
+        prompt="consent",
+        include_granted_scopes="true",
+    )
+    return auth_url
+
+
+async def complete_web_flow(db: AsyncSession, code: str) -> User:
+    """Exchange the authorization code for tokens and persist them.
+
+    Called from the `/auth/google/callback` handler after Google redirects
+    the user back with `?code=...`. Mirrors `start_local_flow` but uses the
+    Web Application flow (no local server, no prompted browser).
+    """
+    flow = _make_web_flow()
+
+    def _exchange() -> Credentials:
+        flow.fetch_token(code=code)
+        return flow.credentials
+
+    creds: Credentials = await asyncio.get_running_loop().run_in_executor(
+        None, _exchange
+    )
+    if not creds.refresh_token:
+        raise GoogleAuthError(
+            "No refresh_token returned. The user may have authorized before "
+            "for the same client; re-issue with prompt=consent or revoke and retry."
+        )
+
+    google_email = await _fetch_google_email(creds)
+
+    user = await get_or_create_default_user(db)
+    if google_email and not user.google_email:
+        user.google_email = google_email
+    await db.flush()
+
+    await _save_credentials(db, user.id, creds)
+    return user
 
 
 async def start_local_flow(db: AsyncSession) -> User:

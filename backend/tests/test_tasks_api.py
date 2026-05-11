@@ -490,3 +490,35 @@ async def test_scheduled_endpoint_excludes_completed_by_default(
     r = await client.get("/tasks/scheduled?include_completed=true")
     titles = sorted(t["title"] for t in r.json())
     assert titles == ["active", "done"]
+
+
+async def test_event_log_records_task_lifecycle(
+    client: AsyncClient, db_session, test_user
+) -> None:
+    """Sanity: creating + completing a task writes corresponding event_log rows."""
+    from sqlalchemy import select
+    from app.models import EventLog
+
+    list_id = (await client.post("/lists", json={"title": "x"})).json()["id"]
+    task = (
+        await client.post(
+            f"/lists/{list_id}/tasks",
+            json={"title": "log-target", "duration_min": 60},
+        )
+    ).json()
+    await client.post(f"/tasks/{task['id']}/complete")
+
+    rows = (
+        await db_session.execute(
+            select(EventLog)
+            .where(EventLog.user_id == test_user.id, EventLog.subject_id == task["id"])
+            .order_by(EventLog.id)
+        )
+    ).scalars().all()
+    types = [r.event_type for r in rows]
+    assert "task.created" in types
+    assert "task.completed" in types
+    completed = next(r for r in rows if r.event_type == "task.completed")
+    # Payload carries the values useful for accuracy analysis later.
+    assert completed.payload["duration_min"] == 60
+    assert "completed_at" in completed.payload
