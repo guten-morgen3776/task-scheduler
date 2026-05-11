@@ -90,12 +90,15 @@ async def create_task_in_list(
 async def list_scheduled_tasks_endpoint(
     start: datetime | None = Query(None),
     end: datetime | None = Query(None),
+    include_completed: bool = Query(False),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> list[TaskRead]:
     """Return tasks with `scheduled_start` set, ordered chronologically.
 
     Optional `start` / `end` (TZ-aware ISO 8601) filter the placement window.
+    Completed tasks are omitted by default — set `include_completed=true` to
+    include them.
     """
     if start is not None and start.tzinfo is None:
         raise HTTPException(
@@ -108,7 +111,7 @@ async def list_scheduled_tasks_endpoint(
             detail={"error": "validation_error", "message": "end must include a timezone"},
         )
     rows = await tasks_service.list_scheduled_tasks(
-        db, user.id, start=start, end=end
+        db, user.id, start=start, end=end, include_completed=include_completed
     )
     return [TaskRead.model_validate(r) for r in rows]
 

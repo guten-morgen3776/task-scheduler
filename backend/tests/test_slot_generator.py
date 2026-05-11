@@ -76,27 +76,23 @@ async def test_empty_calendar_returns_full_work_hours(
         assert "T03:00:00Z" not in s["start"]
 
 
-async def test_intern_day_only_after_work(client: AsyncClient, fake_calendar) -> None:
+async def test_intern_day_classified_by_busy_hours(client: AsyncClient, fake_calendar) -> None:
+    """8 hours of intern work + commute = >= 6h busy → heavy_day. There's no
+    longer an intern-specific classification."""
     fake_calendar["events"] = [
         _ev("i1", "インターン勤務", _jst(2026, 5, 11, 10), _jst(2026, 5, 11, 18))
     ]
     slots = await _query(client, _jst(2026, 5, 11, 0), _jst(2026, 5, 12, 0))
-    # All slots should be intern_day classification
-    assert all(s["day_type"] == "intern_day" for s in slots)
-    # Buffer is 20/20 → busy 09:40 - 18:20 → only 09:00-09:40 (40min) before
-    # and 18:20-22:00 (3h40m) after are free
-    # Pre slot: 09:00-09:40 = 40 min (>= min 30, <= max 120) → 1 slot
-    starts = [s["start"] for s in slots]
-    # Pre-work slot exists
+    assert all(s["day_type"] == "heavy_day" for s in slots)
+    # Buffer 20/20 → busy 09:40 - 18:20 → only 09:00-09:40 (40min) before is
+    # available inside the configured 09:00-12:00 + 13:00-19:00 work hours.
     pre = [s for s in slots if s["start"] == _jst(2026, 5, 11, 9).astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")]
     assert len(pre) == 1
     assert pre[0]["duration_min"] == 40
-    # No slot during 10:00-18:00 (busy)
     busy_window_start = _jst(2026, 5, 11, 10).astimezone(UTC)
     busy_window_end = _jst(2026, 5, 11, 18).astimezone(UTC)
     for s in slots:
         s_start = datetime.fromisoformat(s["start"])
-        # No slot strictly inside the busy window (with buffer)
         assert not (busy_window_start <= s_start < busy_window_end)
 
 
@@ -202,3 +198,118 @@ async def test_all_day_event_respected_when_flag_off(
     slots = await _query(client, _jst(2026, 5, 11, 0), _jst(2026, 5, 12, 0))
     # All-day reminder now blocks the entire work window
     assert slots == []
+
+
+async def test_resolve_calendar_ids_defaults_to_all_calendars(
+    db_session, test_user, monkeypatch
+) -> None:
+    """When busy_calendar_ids is empty, all accessible calendars become busy
+    sources by default (matches the project's stated policy). Regression test
+    for the bug where empty busy + empty ignore returned just ['primary']."""
+    from app.schemas.calendar import CalendarInfo
+    from app.services.slots.generator import _resolve_calendar_ids
+
+    async def fake_list_calendars(db, user_id):
+        return [
+            CalendarInfo(
+                id="primary",
+                summary="me",
+                description=None,
+                primary=True,
+                access_role="owner",
+                background_color=None,
+                selected=True,
+                time_zone="Asia/Tokyo",
+            ),
+            CalendarInfo(
+                id="utas@import.calendar.google.com",
+                summary="UTAS",
+                description=None,
+                primary=False,
+                access_role="reader",
+                background_color=None,
+                selected=True,
+                time_zone="UTC",
+            ),
+            CalendarInfo(
+                id="ja.japanese#holiday@group.v.calendar.google.com",
+                summary="JP Holidays",
+                description=None,
+                primary=False,
+                access_role="reader",
+                background_color=None,
+                selected=True,
+                time_zone="Asia/Tokyo",
+            ),
+        ]
+
+    monkeypatch.setattr(calendar_service, "list_calendars", fake_list_calendars)
+
+    settings = await settings_service.get_or_create_settings(db_session, test_user.id)
+    # Default: both lists empty → expect ALL calendars returned.
+    result = await _resolve_calendar_ids(db_session, test_user.id, settings)
+    assert set(result) == {
+        "primary",
+        "utas@import.calendar.google.com",
+        "ja.japanese#holiday@group.v.calendar.google.com",
+    }
+
+    # With ignore set, those are excluded.
+    with_ignore = settings.model_copy(
+        update={
+            "ignore_calendar_ids": ["ja.japanese#holiday@group.v.calendar.google.com"]
+        }
+    )
+    result = await _resolve_calendar_ids(db_session, test_user.id, with_ignore)
+    assert set(result) == {"primary", "utas@import.calendar.google.com"}
+
+    # busy_calendar_ids takes precedence — ignore is irrelevant when set.
+    with_busy = settings.model_copy(
+        update={
+            "busy_calendar_ids": ["primary"],
+            "ignore_calendar_ids": ["something"],
+        }
+    )
+    result = await _resolve_calendar_ids(db_session, test_user.id, with_busy)
+    assert result == ["primary"]
+
+
+async def test_extend_work_hours_adds_evening_slots_with_reduced_energy(
+    db_session, test_user, fake_calendar
+) -> None:
+    """`extend_work_hours_until` appends evening slots beyond the configured
+    work_hours.end, tagged with reduced energy so the optimizer only uses them
+    as a fallback."""
+    from app.services.slots.generator import generate_slots
+
+    slots = await generate_slots(
+        db_session,
+        test_user.id,
+        start=_jst(2026, 5, 11, 0),
+        end=_jst(2026, 5, 12, 0),
+        extend_work_hours_until="23:00",
+        extended_energy_multiplier=0.3,
+    )
+
+    # 19:00 JST = 10:00 UTC marks the boundary between normal and extended.
+    boundary = datetime(2026, 5, 11, 10, 0, tzinfo=UTC)
+    normal = [s for s in slots if s.start < boundary]
+    extended = [s for s in slots if s.start >= boundary]
+    assert normal and extended
+    assert all(s.energy_score == 1.0 for s in normal)
+    assert all(abs(s.energy_score - 0.3) < 1e-9 for s in extended)
+
+
+async def test_no_extension_means_no_evening_slots(
+    db_session, test_user, fake_calendar
+) -> None:
+    from app.services.slots.generator import generate_slots
+
+    slots = await generate_slots(
+        db_session,
+        test_user.id,
+        start=_jst(2026, 5, 11, 0),
+        end=_jst(2026, 5, 12, 0),
+    )
+    # 19:00 JST = 10:00 UTC. No slot should start at or after that.
+    assert all(s.start < datetime(2026, 5, 11, 10, 0, tzinfo=UTC) for s in slots)

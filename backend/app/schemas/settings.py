@@ -63,11 +63,18 @@ class CalendarLocationRule(BaseModel):
 
     At least one of `calendar_id` or `event_summary_matches` must be set.
     First matching rule wins (rules evaluated in list order).
+
+    `unless_day_has_calendar_ids`: if set, the rule is skipped for events on
+    a local day where any same-day event has a calendar_id in this list.
+    Used to express "intern at office UNLESS the same day has a UTAS class
+    (then remote at the university)" — list the UTAS calendar id here and
+    add a fallback rule below that points intern→university.
     """
 
     calendar_id: str | None = None
     event_summary_matches: str | None = None
     location: Location
+    unless_day_has_calendar_ids: list[str] = Field(default_factory=list)
 
     @field_validator("event_summary_matches")
     @classmethod
@@ -150,6 +157,7 @@ class SettingsRead(BaseModel):
     slot_min_duration_min: int = Field(gt=0)
     slot_max_duration_min: int = Field(gt=0)
     ignore_all_day_events: bool
+    voluntary_visit_locations: list[Location] = Field(default_factory=list)
 
 
 class SettingsUpdate(BaseModel):
@@ -164,6 +172,7 @@ class SettingsUpdate(BaseModel):
     slot_min_duration_min: int | None = Field(default=None, gt=0)
     slot_max_duration_min: int | None = Field(default=None, gt=0)
     ignore_all_day_events: bool | None = None
+    voluntary_visit_locations: list[Location] | None = None
 
 
 def build_default_settings() -> SettingsRead:
@@ -190,9 +199,19 @@ def build_default_settings() -> SettingsRead:
                 calendar_id="u06kh7esai92ukk91jeinffulgqd7onf@import.calendar.google.com",
                 location="university",
             ),
+            # Intern at office — but remote on days where UTAS has a class.
+            # When that's the case the next rule (intern→university) wins.
             CalendarLocationRule(
                 event_summary_matches=r"intern|インターン",
                 location="office",
+                unless_day_has_calendar_ids=[
+                    "u06kh7esai92ukk91jeinffulgqd7onf@import.calendar.google.com"
+                ],
+            ),
+            # Fallback when the rule above is skipped: intern + UTAS day → uni library.
+            CalendarLocationRule(
+                event_summary_matches=r"intern|インターン",
+                location="university",
             ),
         ],
         location_commutes={
@@ -201,19 +220,10 @@ def build_default_settings() -> SettingsRead:
             "office": LocationCommute(to_min=20, from_min=20),
         },
         day_type_rules=[
-            # Order matters: first matching rule wins. Specific rules first.
-            DayTypeRule(
-                name="free_day",
-                **{"if": DayTypeCondition(event_count_max=0)},
-                energy=1.0,
-                allowed_max_task_duration_min=240,
-            ),
-            DayTypeRule(
-                name="intern_day",
-                **{"if": DayTypeCondition(event_summary_matches=r"intern|インターン")},
-                energy=0.3,
-                allowed_max_task_duration_min=60,
-            ),
+            # Pure busy-hours classification. Intern days no longer get a
+            # special carve-out — if the day is 8h packed it's heavy_day,
+            # same as any 8h-packed day.
+            # Order matters: first matching rule wins.
             DayTypeRule(
                 name="heavy_day",
                 **{"if": DayTypeCondition(total_busy_hours_min=6.0)},
@@ -232,6 +242,12 @@ def build_default_settings() -> SettingsRead:
                 energy=0.9,
                 allowed_max_task_duration_min=240,
             ),
+            DayTypeRule(
+                name="free_day",
+                **{"if": DayTypeCondition(total_busy_hours_max=0)},
+                energy=1.0,
+                allowed_max_task_duration_min=240,
+            ),
         ],
         day_type_default=DayTypeDefault(
             name="normal",
@@ -244,4 +260,5 @@ def build_default_settings() -> SettingsRead:
         slot_min_duration_min=30,
         slot_max_duration_min=120,
         ignore_all_day_events=True,
+        voluntary_visit_locations=[],
     )

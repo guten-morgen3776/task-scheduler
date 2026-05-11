@@ -15,3 +15,12 @@ export function useSyncFromCalendar() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["tasks"] }),
   });
 }
+
+export function useToggleFixed() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, fixed }: { id: string; fixed: boolean }) =>
+      tasksApi.update(id, { scheduled_fixed: fixed }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["tasks"] }),
+  });
+}

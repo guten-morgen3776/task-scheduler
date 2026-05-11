@@ -26,6 +26,7 @@ def _to_db_kwargs(settings: SettingsRead) -> dict:
         "slot_min_duration_min": settings.slot_min_duration_min,
         "slot_max_duration_min": settings.slot_max_duration_min,
         "ignore_all_day_events": settings.ignore_all_day_events,
+        "voluntary_visit_locations": list(settings.voluntary_visit_locations),
     }
 
 
@@ -43,6 +44,7 @@ def _to_read(row: UserSettings) -> SettingsRead:
             "slot_min_duration_min": row.slot_min_duration_min,
             "slot_max_duration_min": row.slot_max_duration_min,
             "ignore_all_day_events": row.ignore_all_day_events,
+            "voluntary_visit_locations": row.voluntary_visit_locations or [],
         }
     )
 

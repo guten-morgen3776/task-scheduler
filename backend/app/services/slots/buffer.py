@@ -27,10 +27,28 @@ from app.services.slots.domain import BusyPeriod, LocationWindow
 
 
 def assign_event_location(
-    event: CalendarEvent, rules: list[CalendarLocationRule]
+    event: CalendarEvent,
+    rules: list[CalendarLocationRule],
+    *,
+    same_day_events: list[CalendarEvent] | None = None,
 ) -> Location | None:
-    """Return the location of an event by first-match, or None if no rule matches."""
+    """Return the location of an event by first-match, or None if no rule matches.
+
+    `same_day_events` is the list of all events on the same local day as
+    `event`. Used to evaluate `unless_day_has_calendar_ids`: a rule with
+    that field is skipped if any same-day event's `calendar_id` is in the
+    listed set. Example use: "intern→office unless the day also has a UTAS
+    class, in which case intern is remote at university".
+    """
+    same_day_events = same_day_events or [event]
     for rule in rules:
+        if rule.unless_day_has_calendar_ids:
+            blocked = any(
+                ev.calendar_id in rule.unless_day_has_calendar_ids
+                for ev in same_day_events
+            )
+            if blocked:
+                continue
         if rule.calendar_id is not None and event.calendar_id == rule.calendar_id:
             return rule.location
         if rule.event_summary_matches is not None:
@@ -62,7 +80,7 @@ def compute_location_windows(
     for _date, day_events in by_day.items():
         per_location: dict[Location, list[CalendarEvent]] = defaultdict(list)
         for ev in day_events:
-            loc = assign_event_location(ev, rules)
+            loc = assign_event_location(ev, rules, same_day_events=day_events)
             if loc is None or loc == "anywhere":
                 continue
             per_location[loc].append(ev)
@@ -83,6 +101,7 @@ def compute_location_windows(
                     # `commute_from_min` minutes are the actual return commute.
                     end=last_end + timedelta(minutes=linger_after_min + from_min),
                     commute_from_min=from_min,
+                    commute_to_min=to_min,
                 )
             )
     windows.sort(key=lambda w: w.start)
@@ -105,6 +124,27 @@ def compute_busy_periods(
     # (busy). Anything between last_event.end and the start of commute_from is the
     # linger zone (free at location).
     for w in windows:
+        if w.is_voluntary:
+            # Voluntary visit window: no anchor events. Treat the explicit
+            # commute_to/from minutes as busy edges; the middle is free at
+            # the location.
+            if w.commute_to_min > 0:
+                periods.append(
+                    BusyPeriod(
+                        start=w.start,
+                        end=w.start + timedelta(minutes=w.commute_to_min),
+                        sources=(f"commute_to:{w.location}",),
+                    )
+                )
+            if w.commute_from_min > 0:
+                periods.append(
+                    BusyPeriod(
+                        start=w.end - timedelta(minutes=w.commute_from_min),
+                        end=w.end,
+                        sources=(f"commute_from:{w.location}",),
+                    )
+                )
+            continue
         events_in = [ev for ev in events if w.start <= ev.start and ev.end <= w.end]
         if not events_in:
             periods.append(

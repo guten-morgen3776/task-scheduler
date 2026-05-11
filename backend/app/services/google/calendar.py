@@ -39,6 +39,7 @@ def _normalize_event(raw: dict[str, Any], calendar_id: str) -> CalendarEvent:
     status = raw.get("status", "confirmed")
     if status not in {"confirmed", "tentative", "cancelled"}:
         status = "confirmed"
+    private = (raw.get("extendedProperties") or {}).get("private") or {}
     return CalendarEvent(
         id=raw["id"],
         calendar_id=calendar_id,
@@ -49,6 +50,9 @@ def _normalize_event(raw: dict[str, Any], calendar_id: str) -> CalendarEvent:
         all_day=all_day_start or all_day_end,
         location=raw.get("location"),
         status=status,
+        extended_properties_private={
+            str(k): str(v) for k, v in private.items()
+        },
     )
 
 

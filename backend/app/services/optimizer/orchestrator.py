@@ -10,6 +10,9 @@ from app.services.optimizer.constraints.all_or_nothing import AllOrNothingConstr
 from app.services.optimizer.constraints.base import Constraint
 from app.services.optimizer.constraints.deadline import DeadlineConstraint
 from app.services.optimizer.constraints.duration_cap import DurationCapConstraint
+from app.services.optimizer.constraints.force_deadlined import (
+    ForceDeadlinedConstraint,
+)
 from app.services.optimizer.constraints.location_compatibility import (
     LocationCompatibilityConstraint,
 )
@@ -25,7 +28,9 @@ from app.services.optimizer.domain import (
     TaskAssignment,
 )
 from app.services.optimizer.objectives.base import ObjectiveTerm
+from app.services.optimizer.objectives.early_placement import EarlyPlacementObjective
 from app.services.optimizer.objectives.energy_match import EnergyMatchObjective
+from app.services.optimizer.objectives.keep_together import KeepTogetherObjective
 from app.services.optimizer.objectives.priority import PriorityObjective
 from app.services.optimizer.objectives.unassigned_penalty import UnassignedPenaltyObjective
 from app.services.optimizer.objectives.urgency import UrgencyObjective
@@ -38,6 +43,7 @@ def default_constraints() -> list[Constraint]:
         AllOrNothingConstraint(),
         SlotCapacityConstraint(),
         DeadlineConstraint(),
+        ForceDeadlinedConstraint(),
         DurationCapConstraint(),
         MinFragmentSizeConstraint(),
         MaxFragmentsConstraint(),
@@ -51,6 +57,8 @@ def default_objectives() -> list[ObjectiveTerm]:
         UrgencyObjective(),
         EnergyMatchObjective(),
         UnassignedPenaltyObjective(),
+        KeepTogetherObjective(),
+        EarlyPlacementObjective(),
     ]
 
 
@@ -134,12 +142,22 @@ class Optimizer:
         elapsed_sec: float,
     ) -> SolveResult:
         if status not in {"optimal", "feasible"}:
+            notes: list[str] = []
+            if status == "infeasible":
+                notes = _diagnose_deadline_infeasibility(ctx.tasks, ctx.slots)
+                if not notes:
+                    notes = [
+                        "infeasible: deadline tasks fit pre-deadline individually "
+                        "but compete for the same slots — try widening the range "
+                        "or relaxing duration_cap/min_fragment_size"
+                    ]
             return SolveResult(
                 status=status,
                 objective_value=None,
                 assignments=[],
                 unassigned_task_ids=[t.id for t in ctx.tasks],
                 solve_time_sec=elapsed_sec,
+                notes=notes,
             )
 
         backend = ctx.backend
@@ -200,3 +218,44 @@ class Optimizer:
             unassigned_task_ids=unassigned,
             solve_time_sec=elapsed_sec,
         )
+
+
+def _diagnose_deadline_infeasibility(
+    tasks: list[OptimizerTask], slots: list[OptimizerSlot]
+) -> list[str]:
+    """Identify deadlined tasks that individually can't fit before their deadline.
+
+    Counts slot minutes that are (a) before the deadline, (b) location-compatible,
+    and (c) have a per-task duration cap that admits this task's full duration.
+    Does NOT account for inter-task slot competition, so an empty result means
+    each deadline task fits on its own but they collide somewhere — see the
+    fallback note in the caller.
+    """
+    notes: list[str] = []
+    for t in tasks:
+        if t.deadline is None:
+            continue
+        usable_min = 0
+        for s in slots:
+            if s.end > t.deadline:
+                continue
+            # Mirrors LocationCompatibilityConstraint logic.
+            if (
+                t.location is not None
+                and t.location != "anywhere"
+                and s.location != "anywhere"
+                and s.location != t.location
+            ):
+                continue
+            # Mirrors DurationCapConstraint: a task longer than the cap is
+            # fully excluded from that slot.
+            if t.duration_min > s.allowed_max_task_duration_min:
+                continue
+            usable_min += s.duration_min
+        if usable_min < t.duration_min:
+            notes.append(
+                f"task '{t.title}' ({t.duration_min}min, deadline "
+                f"{t.deadline.isoformat()}) cannot fit: only {usable_min}min of "
+                f"compatible slots before the deadline"
+            )
+    return notes

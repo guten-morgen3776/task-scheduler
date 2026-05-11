@@ -6,8 +6,8 @@
 
 set -uo pipefail
 
-PORT_BACKEND=8000
-PORT_FRONTEND=5173
+PORT_BACKEND=47823
+PORT_FRONTEND=47824
 
 # Resolve the repo root from the script's own location so this still works
 # if the directory is moved.
@@ -24,6 +24,25 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
 is_listening() {
   lsof -nP -iTCP:"$1" -sTCP:LISTEN -t >/dev/null 2>&1
 }
+who_holds() {
+  # First column from lsof for whoever is listening on the port.
+  lsof -nP -iTCP:"$1" -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1" (pid "$2")"}'
+}
+is_our_backend() {
+  curl -fs -o /dev/null --max-time 1 "http://localhost:$PORT_BACKEND/health"
+}
+is_our_frontend() {
+  curl -fs -o /dev/null --max-time 1 "http://localhost:$PORT_FRONTEND/"
+}
+
+abort_port_taken() {
+  local port="$1" name="$2"
+  echo "ERROR: port $port is in use by another process: $(who_holds "$port")" >&2
+  echo "  This is NOT our $name. Stop that process and try again." >&2
+  echo "  Inspect with:  lsof -nP -iTCP:$port -sTCP:LISTEN" >&2
+  echo "  Common cause:  Docker Desktop / a stale container / another dev server." >&2
+  exit 1
+}
 
 backend_pid=""
 frontend_pid=""
@@ -38,7 +57,11 @@ cleanup() {
 trap cleanup INT TERM
 
 if is_listening "$PORT_BACKEND"; then
-  echo "Backend already running on :$PORT_BACKEND — reusing it."
+  if is_our_backend; then
+    echo "Backend already running on :$PORT_BACKEND — reusing it."
+  else
+    abort_port_taken "$PORT_BACKEND" backend
+  fi
 else
   echo "Starting backend on :$PORT_BACKEND ..."
   ( cd "$REPO/backend" \
@@ -48,7 +71,11 @@ else
 fi
 
 if is_listening "$PORT_FRONTEND"; then
-  echo "Frontend already running on :$PORT_FRONTEND — reusing it."
+  if is_our_frontend; then
+    echo "Frontend already running on :$PORT_FRONTEND — reusing it."
+  else
+    abort_port_taken "$PORT_FRONTEND" frontend
+  fi
 else
   echo "Starting frontend on :$PORT_FRONTEND ..."
   ( cd "$REPO/frontend" \

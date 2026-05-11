@@ -28,18 +28,20 @@ def _settings():
     return build_default_settings()
 
 
-def test_intern_day_wins_when_intern_keyword_present() -> None:
+def test_intern_day_falls_under_busy_hours_classification() -> None:
+    """Intern days no longer get a special rule — they're classified by busy
+    hours like any other day (8h intern → heavy_day)."""
     s = _settings()
     events = [_ev("a", "インターン勤務"), _ev("b", "授業")]
     r = classify_day(
         date(2026, 5, 11),
         events,
-        4.0,  # 4 hours busy (irrelevant; intern keyword wins first)
+        8.0,
         s.day_type_rules,
         s.day_type_default,
         {},
     )
-    assert r.name == "intern_day"
+    assert r.name == "heavy_day"
 
 
 def test_heavy_day_when_busy_hours_high() -> None:

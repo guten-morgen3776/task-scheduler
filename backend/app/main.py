@@ -16,7 +16,10 @@ app = FastAPI(title="task-scheduler", version="0.3.0")
 if get_settings().app_env == "dev":
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173"],
+        allow_origins=[
+            "http://localhost:47824",
+            "http://localhost:5173",  # Vite default — kept for ad-hoc use.
+        ],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

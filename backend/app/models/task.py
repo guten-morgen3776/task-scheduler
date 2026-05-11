@@ -59,6 +59,12 @@ class Task(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     scheduled_fragments: Mapped[list[dict[str, Any]] | None] = mapped_column(
         JSON, nullable=True
     )
+    # When True, the task's current placement is locked: subsequent /optimize
+    # runs leave its scheduled_* fields untouched and treat the time as busy
+    # for everything else.
+    scheduled_fixed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
 
     __table_args__ = (
         CheckConstraint("priority >= 1 AND priority <= 5", name="ck_tasks_priority_range"),

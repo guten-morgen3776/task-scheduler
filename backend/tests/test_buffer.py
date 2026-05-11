@@ -273,3 +273,81 @@ def test_location_at_outside_returns_home() -> None:
     w = LocationWindow(location="university", start=_at(10), end=_at(15))
     assert location_at(_at(8), [w]) == "home"
     assert location_at(_at(15), [w]) == "home"  # right edge is exclusive
+
+
+def test_voluntary_window_busy_periods():
+    """is_voluntary=True window: commute_to at start, commute_from at end, middle free."""
+    from datetime import UTC, datetime
+    from app.services.slots.buffer import compute_busy_periods
+    from app.services.slots.domain import LocationWindow
+
+    w = LocationWindow(
+        location="university",
+        start=datetime(2026, 5, 12, 0, 0, tzinfo=UTC),    # 09:00 JST - 30min
+        end=datetime(2026, 5, 12, 10, 30, tzinfo=UTC),    # 19:00 JST + 30min
+        commute_from_min=30,
+        commute_to_min=30,
+        is_voluntary=True,
+    )
+    busy = compute_busy_periods(events=[], windows=[w])
+    # Expect: [00:00–00:30 commute_to, 10:00–10:30 commute_from]
+    assert len(busy) == 2
+    assert busy[0].start == datetime(2026, 5, 12, 0, 0, tzinfo=UTC)
+    assert busy[0].end == datetime(2026, 5, 12, 0, 30, tzinfo=UTC)
+    assert busy[1].start == datetime(2026, 5, 12, 10, 0, tzinfo=UTC)
+    assert busy[1].end == datetime(2026, 5, 12, 10, 30, tzinfo=UTC)
+
+
+def test_assign_location_skips_rule_when_unless_day_has_calendar_matches():
+    """A rule with `unless_day_has_calendar_ids` is bypassed when any same-day
+    event's calendar_id is in that list. Used for: intern→office, BUT when UTAS
+    has a class the same day, intern is remote → fallback rule → university."""
+    from datetime import UTC, datetime
+    from app.schemas.calendar import CalendarEvent
+    from app.schemas.settings import CalendarLocationRule
+    from app.services.slots.buffer import assign_event_location
+
+    def _ev(eid, calendar_id, summary, hour) -> CalendarEvent:
+        return CalendarEvent(
+            id=eid,
+            calendar_id=calendar_id,
+            summary=summary,
+            description=None,
+            start=datetime(2026, 5, 12, hour, 0, tzinfo=UTC),
+            end=datetime(2026, 5, 12, hour + 1, 0, tzinfo=UTC),
+            all_day=False,
+            location=None,
+            status="confirmed",
+        )
+
+    UTAS = "utas@import.calendar.google.com"
+    rules = [
+        CalendarLocationRule(calendar_id=UTAS, location="university"),
+        CalendarLocationRule(
+            event_summary_matches=r"intern|インターン",
+            location="office",
+            unless_day_has_calendar_ids=[UTAS],
+        ),
+        CalendarLocationRule(
+            event_summary_matches=r"intern|インターン",
+            location="university",
+        ),
+    ]
+
+    intern = _ev("intern1", "primary", "インターン勤務", 9)
+    utas_event = _ev("utas1", UTAS, "物性化学", 14)
+
+    # Day with intern only → office.
+    assert assign_event_location(intern, rules, same_day_events=[intern]) == "office"
+
+    # Day with both intern and a UTAS class → first rule is bypassed → uni.
+    assert (
+        assign_event_location(intern, rules, same_day_events=[intern, utas_event])
+        == "university"
+    )
+
+    # UTAS event itself is always university (matches first rule).
+    assert (
+        assign_event_location(utas_event, rules, same_day_events=[intern, utas_event])
+        == "university"
+    )

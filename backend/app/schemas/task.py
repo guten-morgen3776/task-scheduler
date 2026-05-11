@@ -29,6 +29,7 @@ class TaskUpdate(BaseModel):
     priority: Priority | None = None
     deadline: datetime | None = None
     location: Location | None = None
+    scheduled_fixed: bool | None = None
 
 
 class TaskMove(BaseModel):
@@ -61,6 +62,7 @@ class TaskRead(BaseModel):
     scheduled_start: datetime | None
     scheduled_end: datetime | None
     scheduled_fragments: list[ScheduledFragment] | None
+    scheduled_fixed: bool
     created_at: datetime
     updated_at: datetime
 

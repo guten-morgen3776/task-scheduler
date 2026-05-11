@@ -53,17 +53,22 @@ async def list_scheduled_tasks(
     *,
     start=None,
     end=None,
+    include_completed: bool = False,
 ) -> list[Task]:
     """Tasks with a scheduled placement, optionally filtered by [start, end].
 
     Filtering is done on `scheduled_start`. Tasks without a placement are
-    omitted. Completed tasks are included so the UI can show them as done.
+    omitted. Completed tasks are excluded by default — the "現在のスケジュール"
+    panel only shows what's still on the user's plate. Pass
+    `include_completed=True` to surface them anyway (e.g., for an audit view).
     """
     stmt = (
         select(Task)
         .where(Task.user_id == user_id, Task.scheduled_start.is_not(None))
         .order_by(Task.scheduled_start)
     )
+    if not include_completed:
+        stmt = stmt.where(Task.completed.is_(False))
     if start is not None:
         stmt = stmt.where(Task.scheduled_start >= start)
     if end is not None:
@@ -262,6 +267,7 @@ async def update_task(
         "priority",
         "deadline",
         "location",
+        "scheduled_fixed",
     }
     for key, value in fields.items():
         if key not in allowed or value is None:

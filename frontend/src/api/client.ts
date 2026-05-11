@@ -1,6 +1,6 @@
 import type { ApiErrorBody } from "./types";
 
-const BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
+const BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:47823";
 
 export class ApiError extends Error {
   readonly status: number;

@@ -58,10 +58,16 @@ def _split_into_chunks(
 async def _resolve_calendar_ids(
     db: AsyncSession, user_id: str, settings: SettingsRead
 ) -> list[str]:
+    """Decide which calendars contribute busy time for slot generation.
+
+    Resolution order:
+      1. `busy_calendar_ids` set → use exactly those.
+      2. Otherwise → fetch every calendar the user has access to, minus the
+         ones in `ignore_calendar_ids`. This matches the project's stated
+         policy of "treat all non-holiday calendars as busy by default".
+    """
     if settings.busy_calendar_ids:
         return list(settings.busy_calendar_ids)
-    if not settings.ignore_calendar_ids:
-        return ["primary"]
     all_calendars = await calendar_service.list_calendars(db, user_id)
     ignore = set(settings.ignore_calendar_ids)
     return [c.id for c in all_calendars if c.id not in ignore]
@@ -76,6 +82,9 @@ def _generate_for_day(
     range_start_utc: datetime,
     range_end_utc: datetime,
     tz: ZoneInfo,
+    *,
+    extend_work_hours_until: str | None = None,
+    extended_energy_multiplier: float = 0.3,
 ) -> list[Slot]:
     weekday = WEEKDAYS[target_date.weekday()]
     work_day = settings.work_hours.for_weekday(weekday)
@@ -93,6 +102,39 @@ def _generate_for_day(
         settings.day_type_overrides,
     )
 
+    def _emit_slots(
+        ws_start: datetime,
+        ws_end: datetime,
+        *,
+        energy: float,
+    ) -> list[Slot]:
+        produced: list[Slot] = []
+        free_intervals = subtract_busy((ws_start, ws_end), busy)
+        for fs, fe in free_intervals:
+            for sub_fs, sub_fe in split_at_window_boundaries((fs, fe), windows):
+                duration_total = int((sub_fe - sub_fs).total_seconds() / 60)
+                if duration_total < settings.slot_min_duration_min:
+                    continue
+                slot_location = location_at(sub_fs, windows)
+                for chunk_start, chunk_min in _split_into_chunks(
+                    sub_fs,
+                    sub_fe,
+                    settings.slot_max_duration_min,
+                    settings.slot_min_duration_min,
+                ):
+                    produced.append(
+                        Slot(
+                            id=make_slot_id(chunk_start, chunk_min),
+                            start=chunk_start,
+                            duration_min=chunk_min,
+                            energy_score=energy,
+                            allowed_max_task_duration_min=day_type.allowed_max_task_duration_min,
+                            day_type=day_type.name,
+                            location=slot_location,
+                        )
+                    )
+        return produced
+
     out: list[Slot] = []
     for ws in work_day.slots:
         ws_start_local = datetime.combine(target_date, _parse_hhmm(ws.start), tzinfo=tz)
@@ -102,30 +144,27 @@ def _generate_for_day(
         ws_end = min(ws_end_local.astimezone(UTC), range_end_utc)
         if ws_start >= ws_end:
             continue
+        out.extend(_emit_slots(ws_start, ws_end, energy=day_type.energy))
 
-        free_intervals = subtract_busy((ws_start, ws_end), busy)
-        for fs, fe in free_intervals:
-            # Split each free interval at window boundaries so a single slot
-            # never crosses location boundaries.
-            for sub_fs, sub_fe in split_at_window_boundaries((fs, fe), windows):
-                duration_total = int((sub_fe - sub_fs).total_seconds() / 60)
-                if duration_total < settings.slot_min_duration_min:
-                    continue
-                slot_location = location_at(sub_fs, windows)
-                for chunk_start, chunk_min in _split_into_chunks(
-                    sub_fs, sub_fe, settings.slot_max_duration_min, settings.slot_min_duration_min
-                ):
-                    out.append(
-                        Slot(
-                            id=make_slot_id(chunk_start, chunk_min),
-                            start=chunk_start,
-                            duration_min=chunk_min,
-                            energy_score=day_type.energy,
-                            allowed_max_task_duration_min=day_type.allowed_max_task_duration_min,
-                            day_type=day_type.name,
-                            location=slot_location,
-                        )
+    # Fallback slots beyond work_hours, used only when the standard pass is
+    # infeasible. Their `energy_score` is scaled down so the optimizer prefers
+    # normal-hour slots whenever it can.
+    if extend_work_hours_until and work_day.slots:
+        last_end = _parse_hhmm(work_day.slots[-1].end)
+        extend_end = _parse_hhmm(extend_work_hours_until)
+        if extend_end > last_end:
+            ext_start_local = datetime.combine(target_date, last_end, tzinfo=tz)
+            ext_end_local = datetime.combine(target_date, extend_end, tzinfo=tz)
+            ext_start = max(ext_start_local.astimezone(UTC), range_start_utc)
+            ext_end = min(ext_end_local.astimezone(UTC), range_end_utc)
+            if ext_start < ext_end:
+                out.extend(
+                    _emit_slots(
+                        ext_start,
+                        ext_end,
+                        energy=day_type.energy * extended_energy_multiplier,
                     )
+                )
     return out
 
 
@@ -137,7 +176,20 @@ async def generate_slots(
     *,
     min_duration_override: int | None = None,
     max_duration_override: int | None = None,
+    extra_busy_periods: list[BusyPeriod] | None = None,
+    extra_windows: list[LocationWindow] | None = None,
+    exclude_app_marked_events: bool = False,
+    extend_work_hours_until: str | None = None,
+    extended_energy_multiplier: float = 0.3,
 ) -> list[Slot]:
+    """Generate available slots for `[start, end)`.
+
+    `extra_busy_periods` adds extra busy time (e.g., fixed task fragments).
+    `extra_windows` adds extra location windows (e.g., voluntary visits).
+    `exclude_app_marked_events` drops events written by this app from the busy
+    set so re-optimization can re-place those tasks. Required to be `True` when
+    re-optimizing after a /write.
+    """
     settings = await settings_service.get_or_create_settings(db, user_id)
 
     if min_duration_override is not None:
@@ -151,12 +203,24 @@ async def generate_slots(
     )
     if settings.ignore_all_day_events:
         events = [e for e in events if not e.all_day]
+    if exclude_app_marked_events:
+        events = [
+            e
+            for e in events
+            if e.extended_properties_private.get("task_scheduler") != "1"
+        ]
 
     tz = ZoneInfo(settings.work_hours.timezone)
     windows = compute_location_windows(
         events, settings.calendar_location_rules, settings.location_commutes, tz
     )
+    if extra_windows:
+        windows = list(windows) + list(extra_windows)
+        windows.sort(key=lambda w: w.start)
     busy = compute_busy_periods(events, windows)
+    if extra_busy_periods:
+        busy = list(busy) + list(extra_busy_periods)
+        busy.sort(key=lambda p: p.start)
 
     start_local = start.astimezone(tz)
     end_local = end.astimezone(tz)
@@ -168,7 +232,16 @@ async def generate_slots(
     for d in _iter_dates(start_local.date(), end_local.date()):
         slots.extend(
             _generate_for_day(
-                d, events, busy, windows, settings, range_start_utc, range_end_utc, tz
+                d,
+                events,
+                busy,
+                windows,
+                settings,
+                range_start_utc,
+                range_end_utc,
+                tz,
+                extend_work_hours_until=extend_work_hours_until,
+                extended_energy_multiplier=extended_energy_multiplier,
             )
         )
     slots.sort(key=lambda s: s.start)

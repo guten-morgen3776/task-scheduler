@@ -427,3 +427,66 @@ async def test_sync_from_calendar_populates_fragments(
     )
     # scheduled_event_id is the fragment_index=0 event.
     assert fresh.scheduled_event_id == "ev_001"
+
+
+async def test_scheduled_fixed_can_be_patched(client: AsyncClient) -> None:
+    list_id = (await client.post("/lists", json={"title": "x"})).json()["id"]
+    task = (
+        await client.post(
+            f"/lists/{list_id}/tasks", json={"title": "t", "duration_min": 60}
+        )
+    ).json()
+    assert task["scheduled_fixed"] is False
+
+    r = await client.patch(f"/tasks/{task['id']}", json={"scheduled_fixed": True})
+    assert r.status_code == 200
+    assert r.json()["scheduled_fixed"] is True
+
+    r = await client.patch(f"/tasks/{task['id']}", json={"scheduled_fixed": False})
+    assert r.json()["scheduled_fixed"] is False
+
+
+async def test_scheduled_endpoint_excludes_completed_by_default(
+    client: AsyncClient, db_session, test_user
+) -> None:
+    """GET /tasks/scheduled omits completed tasks by default; include_completed=true brings them back."""
+    from datetime import UTC, datetime
+    from app.models import Task, TaskList
+
+    list_row = TaskList(user_id=test_user.id, title="x", position="000010")
+    db_session.add(list_row)
+    await db_session.flush()
+
+    active = Task(
+        user_id=test_user.id,
+        list_id=list_row.id,
+        title="active",
+        position="000010",
+        duration_min=60,
+        scheduled_start=datetime(2026, 5, 12, 3, 0, tzinfo=UTC),
+        scheduled_end=datetime(2026, 5, 12, 4, 0, tzinfo=UTC),
+        completed=False,
+    )
+    done = Task(
+        user_id=test_user.id,
+        list_id=list_row.id,
+        title="done",
+        position="000020",
+        duration_min=60,
+        scheduled_start=datetime(2026, 5, 12, 5, 0, tzinfo=UTC),
+        scheduled_end=datetime(2026, 5, 12, 6, 0, tzinfo=UTC),
+        completed=True,
+        completed_at=datetime(2026, 5, 12, 6, 0, tzinfo=UTC),
+    )
+    db_session.add_all([active, done])
+    await db_session.commit()
+
+    # Default: completed excluded.
+    r = await client.get("/tasks/scheduled")
+    titles = [t["title"] for t in r.json()]
+    assert titles == ["active"]
+
+    # Opt-in: both returned.
+    r = await client.get("/tasks/scheduled?include_completed=true")
+    titles = sorted(t["title"] for t in r.json())
+    assert titles == ["active", "done"]

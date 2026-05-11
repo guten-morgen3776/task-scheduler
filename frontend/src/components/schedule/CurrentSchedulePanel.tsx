@@ -1,7 +1,9 @@
 import { useMemo } from "react";
+import { clsx } from "clsx";
 import {
   useScheduled,
   useSyncFromCalendar,
+  useToggleFixed,
 } from "../../hooks/useScheduled";
 import type { Task } from "../../api/types";
 import { Button, Card, ErrorBanner } from "../ui";
@@ -10,6 +12,7 @@ interface ScheduleEntry {
   taskId: string;
   title: string;
   completed: boolean;
+  fixed: boolean;
   start: Date;
   end: Date;
   fragmentIndex: number;
@@ -35,6 +38,7 @@ export function CurrentSchedulePanel() {
 
   const { data, isLoading, error, refetch } = useScheduled(startIso, endIso);
   const sync = useSyncFromCalendar();
+  const toggleFixed = useToggleFixed();
 
   const grouped = useMemo(
     () => groupEntriesByLocalDate(toScheduleEntries(data ?? [], windowStart, windowEnd)),
@@ -98,11 +102,12 @@ export function CurrentSchedulePanel() {
                       {formatRange(entry.start, entry.end)}
                     </span>
                     <span
-                      className={
+                      className={clsx(
+                        "flex-1 min-w-0",
                         entry.completed
                           ? "line-through text-gray-400"
-                          : "text-gray-900"
-                      }
+                          : "text-gray-900",
+                      )}
                     >
                       {entry.title}
                       {entry.fragmentCount > 1 && (
@@ -111,6 +116,29 @@ export function CurrentSchedulePanel() {
                         </span>
                       )}
                     </span>
+                    <button
+                      type="button"
+                      className={clsx(
+                        "shrink-0 text-xs px-2 py-0.5 rounded-md border transition",
+                        entry.fixed
+                          ? "bg-amber-50 border-amber-300 text-amber-800"
+                          : "bg-white border-gray-200 text-gray-400 hover:text-gray-700 hover:border-gray-300",
+                      )}
+                      onClick={() =>
+                        toggleFixed.mutate({
+                          id: entry.taskId,
+                          fixed: !entry.fixed,
+                        })
+                      }
+                      disabled={toggleFixed.isPending}
+                      title={
+                        entry.fixed
+                          ? "再最適化で動かないように固定中。クリックで解除"
+                          : "クリックして固定（再最適化で動かない）"
+                      }
+                    >
+                      {entry.fixed ? "🔒 fixed" : "fix"}
+                    </button>
                   </li>
                 ))}
               </ul>
@@ -151,6 +179,7 @@ function toScheduleEntries(
         taskId: t.id,
         title: t.title,
         completed: t.completed,
+        fixed: t.scheduled_fixed,
         start: f.start,
         end: f.end,
         fragmentIndex: idx,

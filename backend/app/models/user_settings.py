@@ -27,3 +27,8 @@ class UserSettings(Base, TimestampMixin):
     ignore_all_day_events: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True
     )
+    # Locations the user is willing to voluntarily visit when their location-
+    # tagged tasks don't fit existing event-based windows. e.g. ["university"].
+    voluntary_visit_locations: Mapped[list[str]] = mapped_column(
+        JSON, nullable=False, default=list
+    )

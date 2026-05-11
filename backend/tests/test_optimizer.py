@@ -85,11 +85,203 @@ def test_deadline_constraint_blocks_late_slots() -> None:
     assert all(f.slot_id == "early" for f in assignment.fragments)
 
 
-def test_no_slot_before_deadline_leads_to_unassigned() -> None:
-    tasks = [_task("doomed", duration=60, deadline=T0, priority=5)]  # deadline at T0
-    slots = [_slot("after", T0 + timedelta(hours=1), duration=60)]   # all slots after
+def test_no_slot_before_deadline_makes_model_infeasible() -> None:
+    """Deadline tasks MUST be placed pre-deadline; if no slot fits, the model
+    is infeasible (it doesn't silently leave the task unassigned)."""
+    tasks = [
+        _task("doomed", duration=60, deadline=T0, priority=5, title="doomed-report"),
+    ]
+    slots = [_slot("after", T0 + timedelta(hours=1), duration=60)]
     result = Optimizer().solve(tasks, slots)
-    assert "doomed" in result.unassigned_task_ids
+    assert result.status == "infeasible"
+    # Diagnostic note pinpoints the offending task by title.
+    assert any("doomed-report" in n for n in result.notes)
+
+
+def test_deadline_task_with_no_slot_forces_infeasible_even_with_other_options() -> None:
+    """One impossible-to-place deadline task crashes the whole solve even if
+    other deadline-less tasks could have been placed — by design (絶対条件)."""
+    tasks = [
+        _task("doomed", duration=60, deadline=T0, priority=5),
+        _task("flexible", duration=60, deadline=None, priority=3),
+    ]
+    slots = [_slot("after", T0 + timedelta(hours=1), duration=120)]
+    result = Optimizer().solve(tasks, slots)
+    assert result.status == "infeasible"
+
+
+def test_deadline_task_that_fits_is_still_placed() -> None:
+    tasks = [_task("urgent", duration=60, deadline=T0 + timedelta(hours=2), priority=5)]
+    slots = [_slot("early", T0, duration=60)]
+    result = Optimizer().solve(tasks, slots)
+    assert result.status in {"optimal", "feasible"}
+    assert result.unassigned_task_ids == []
+
+
+def test_no_deadline_task_can_still_be_unassigned() -> None:
+    """The new hard constraint applies only to tasks WITH a deadline. Tasks
+    without one may still go unassigned if there isn't room."""
+    tasks = [
+        _task("a", duration=60, deadline=None, priority=3),
+        _task("b", duration=60, deadline=None, priority=3),
+    ]
+    slots = [_slot("only", T0, duration=60)]  # room for one
+    result = Optimizer().solve(tasks, slots)
+    assert result.status in {"optimal", "feasible"}
+    assert len(result.unassigned_task_ids) == 1
+
+
+def test_low_energy_extension_slot_still_lets_deadline_task_fit() -> None:
+    """Extended (evening fallback) slots have a low energy_score so the
+    optimizer only uses them when no regular slot fits. A deadlined task
+    that only fits in such a slot must still be placed."""
+    deadline = T0 + timedelta(hours=2)
+    tasks = [_task("urgent", duration=60, deadline=deadline, priority=5)]
+    slots = [_slot("evening", T0, duration=60, energy=0.21)]  # extension multiplier ≈ 0.3 × 0.7
+    result = Optimizer().solve(tasks, slots)
+    assert result.status in {"optimal", "feasible"}
+    assert result.unassigned_task_ids == []
+
+
+def test_duration_cap_blocks_long_task_when_enabled() -> None:
+    """4h task on a slot whose cap is 90 min → can't be placed (duration_cap)."""
+    tasks = [_task("long", duration=240, deadline=T0 + timedelta(hours=6), priority=5)]
+    slots = [_slot("capped", T0, duration=360, duration_cap=90)]
+    result = Optimizer().solve(tasks, slots)
+    assert result.status == "infeasible"
+
+
+def test_keep_together_prefers_single_slot_over_split() -> None:
+    """When a task fits in one slot, the optimizer should not split it
+    just because the duration also fits across two smaller slots."""
+    tasks = [_task("a", duration=60, priority=3)]
+    slots = [
+        _slot("big", T0, duration=60),
+        _slot("split1", T0 + timedelta(hours=2), duration=30),
+        _slot("split2", T0 + timedelta(hours=3), duration=30),
+    ]
+    result = Optimizer().solve(tasks, slots)
+    assert result.status in {"optimal", "feasible"}
+    assignment = result.assignments[0]
+    assert len(assignment.fragments) == 1
+    assert assignment.fragments[0].slot_id == "big"
+
+
+def test_keep_together_avoids_co_splitting_when_one_task_fits_whole() -> None:
+    """Regression for the 5/12 scenario: two tasks on a day with limited
+    high-energy slots + a low-energy fallback (extension). The optimizer used
+    to split BOTH tasks to maximize energy_match. With the strengthened
+    keep_together weight, it should keep the smaller task whole and only
+    split the one that physically must.
+    """
+    # Two normal-energy slots and one low-energy fallback (extension).
+    slots = [
+        _slot("normal-1", T0, duration=115, energy=0.7),
+        _slot("normal-2", T0 + timedelta(hours=3), duration=120, energy=0.7),
+        _slot("extension", T0 + timedelta(hours=6), duration=120, energy=0.21),
+    ]
+    # 住環境 (180 min) cannot fit in one slot (max single = 120). 現代国際社会論
+    # (90 min) fits whole in normal-1.
+    tasks = [
+        _task("housing", duration=180, priority=4),
+        _task("intl", duration=90, priority=4),
+    ]
+    result = Optimizer().solve(tasks, slots)
+    assert result.status in {"optimal", "feasible"}
+    assignments = {a.task_id: a for a in result.assignments}
+    # 現代国際社会論 should not be split (90 min fits in one slot).
+    assert len(assignments["intl"].fragments) == 1
+    # 住環境 has to split since 180 > 120 max slot, but it should be exactly 2.
+    assert len(assignments["housing"].fragments) == 2
+
+
+def test_keep_together_prefers_same_day_over_multi_day() -> None:
+    """Given the choice of putting a 90-min task entirely in one day's slots
+    vs spreading it across two days, the optimizer should keep it on one day."""
+    day1_morning = T0
+    day1_afternoon = T0 + timedelta(hours=4)
+    day2_morning = T0 + timedelta(days=1)
+    tasks = [_task("a", duration=90, priority=3)]
+    slots = [
+        _slot("d1-am", day1_morning, duration=60),
+        _slot("d1-pm", day1_afternoon, duration=60),
+        _slot("d2-am", day2_morning, duration=60),
+    ]
+    result = Optimizer().solve(tasks, slots)
+    assert result.status in {"optimal", "feasible"}
+    assignment = result.assignments[0]
+    slot_ids_used = {f.slot_id for f in assignment.fragments}
+    assert slot_ids_used == {"d1-am", "d1-pm"}, (
+        f"expected the same-day pair (d1-am, d1-pm), got {slot_ids_used}"
+    )
+
+
+def test_early_placement_prefers_earlier_slot_when_other_factors_equal() -> None:
+    """With everything else equal (same energy, same location, same day_type),
+    a deadlined task should land in the earlier of two candidate slots."""
+    deadline = T0 + timedelta(days=7)
+    tasks = [_task("a", duration=60, deadline=deadline, priority=3)]
+    slots = [
+        _slot("early", T0, duration=60, energy=0.7),
+        _slot("late", T0 + timedelta(days=5), duration=60, energy=0.7),
+    ]
+    result = Optimizer().solve(tasks, slots)
+    assert result.status in {"optimal", "feasible"}
+    assert result.assignments[0].fragments[0].slot_id == "early"
+
+
+def test_early_placement_inactive_for_tasks_without_deadline() -> None:
+    """Without a deadline there's no concept of "earliness". The objective
+    must not contribute and the placement choice falls back to energy_match
+    / priority / keep_together. With equal energy slots, either is fine."""
+    tasks = [_task("a", duration=60, deadline=None, priority=3)]
+    slots = [
+        _slot("early", T0, duration=60, energy=0.7),
+        _slot("late", T0 + timedelta(days=5), duration=60, energy=0.7),
+    ]
+    result = Optimizer().solve(tasks, slots)
+    assert result.status in {"optimal", "feasible"}
+    chosen = result.assignments[0].fragments[0].slot_id
+    assert chosen in {"early", "late"}
+
+
+def test_early_placement_yields_to_strong_energy_match() -> None:
+    """A large energy_match gain should still win over early_placement —
+    earliness is soft and shouldn't override "actually do hard work when
+    you're fresh"."""
+    deadline = T0 + timedelta(days=7)
+    tasks = [_task("a", duration=60, deadline=deadline, priority=3)]
+    slots = [
+        # Early but very low-energy
+        _slot("early_lowE", T0, duration=60, energy=0.1),
+        # Later but high-energy
+        _slot("late_highE", T0 + timedelta(days=5), duration=60, energy=1.0),
+    ]
+    result = Optimizer().solve(tasks, slots)
+    assert result.status in {"optimal", "feasible"}
+    assert result.assignments[0].fragments[0].slot_id == "late_highE"
+
+
+def test_disabled_duration_cap_lets_over_cap_task_fit() -> None:
+    """With duration_cap disabled (last-resort relaxation in the retry chain),
+    the same 4h task can be placed in the same capped slot."""
+    cfg = OptimizerConfig(
+        enabled_constraints={
+            "all_or_nothing",
+            "slot_capacity",
+            "deadline",
+            "force_deadlined",
+            "min_fragment_size",
+            "max_fragments",
+            "location_compatibility",
+            # duration_cap intentionally omitted
+        }
+    )
+    tasks = [_task("long", duration=240, deadline=T0 + timedelta(hours=6), priority=5)]
+    slots = [_slot("capped", T0, duration=360, duration_cap=90)]
+    result = Optimizer(config=cfg).solve(tasks, slots)
+    assert result.status in {"optimal", "feasible"}
+    assert result.unassigned_task_ids == []
 
 
 # ──────────────────────────────────────────────────────────────────────────

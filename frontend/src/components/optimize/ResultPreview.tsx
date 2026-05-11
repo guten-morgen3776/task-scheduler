@@ -3,8 +3,18 @@ import type { OptimizeResponse } from "../../api/types";
 export function ResultPreview({ result }: { result: OptimizeResponse }) {
   if (result.status === "infeasible") {
     return (
-      <div className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
-        infeasible — タスクが期間内に収まりません。期間を広げるか、タスク量を減らしてください。
+      <div className="space-y-2">
+        <div className="text-sm text-red-800 bg-red-50 border border-red-200 rounded-md px-3 py-2">
+          <strong>infeasible</strong> — 締切タスクが配置不能です。期間を広げるか、
+          該当タスクの締切を見直してください。
+        </div>
+        {result.notes.length > 0 && (
+          <ul className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-md px-3 py-2 space-y-0.5">
+            {result.notes.map((n, i) => (
+              <li key={i}>• {n}</li>
+            ))}
+          </ul>
+        )}
       </div>
     );
   }
@@ -34,6 +44,13 @@ export function ResultPreview({ result }: { result: OptimizeResponse }) {
         <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
           未配置: {result.unassigned.map((u) => u.task_title).join(", ")}
         </div>
+      )}
+      {result.notes.length > 0 && (
+        <ul className="text-xs text-gray-500 space-y-0.5">
+          {result.notes.map((n, i) => (
+            <li key={i}>• {n}</li>
+          ))}
+        </ul>
       )}
     </div>
   );

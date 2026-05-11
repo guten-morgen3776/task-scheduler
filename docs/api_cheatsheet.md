@@ -1,7 +1,7 @@
 # API 基本操作 早見表（Phase 0/1）
 
 > 現状実装されているエンドポイントを curl で叩く際のリファレンス。
-> 実験・動作確認用。OpenAPI ドキュメント版は http://localhost:8000/docs。
+> 実験・動作確認用。OpenAPI ドキュメント版は http://localhost:47823/docs。
 
 ---
 
@@ -11,7 +11,7 @@
 
 ```bash
 cd /Users/aokitenju/task-scheduler/backend
-uv run uvicorn app.main:app --reload --port 8000
+uv run uvicorn app.main:app --reload --port 47823
 ```
 
 別ターミナルで以下を叩く。
@@ -21,7 +21,7 @@ uv run uvicorn app.main:app --reload --port 8000
 curl を叩きやすくするために置いておくと便利:
 
 ```bash
-export TS_BASE=http://localhost:8000
+export TS_BASE=http://localhost:47823
 ```
 
 以下のサンプルでは `$TS_BASE` を使います。
@@ -410,7 +410,7 @@ curl -X POST $TS_BASE/settings/reset
 |---|---|---|
 | `work_hours` | 平日 09-22, 土日 10-22 | 曜日ごとの作業可能時間帯 |
 | `location_buffers` | 大学/インターン/歯科のルール | 場所キーワード → 前後何分を「埋まっている」扱い |
-| `day_type_rules` | intern/uni_heavy/uni_light/free_day | 日タイプ判定の優先順ルール |
+| `day_type_rules` | heavy_day(≥6h) / medium_day(3-6h) / light_day(0-3h) / free_day(0h) | 拘束時間ベース 4 段階の優先順ルール |
 | `day_type_default` | normal (energy 0.7) | どのルールにもマッチしない日 |
 | `day_type_overrides` | `{}` | `{"2026-05-12":"free_day"}` 形式の手動上書き |
 | `busy_calendar_ids` | `[]` | 「忙しい時間」として読むカレンダー ID（空 = 全部対象） |
@@ -730,6 +730,6 @@ done
 ## 7. OpenAPI / Swagger UI
 
 GUI で叩きたい場合:
-- http://localhost:8000/docs ← Swagger UI（試行ボタン付き）
-- http://localhost:8000/redoc ← ReDoc（読みやすい）
-- http://localhost:8000/openapi.json ← 生スキーマ
+- http://localhost:47823/docs ← Swagger UI（試行ボタン付き）
+- http://localhost:47823/redoc ← ReDoc（読みやすい）
+- http://localhost:47823/openapi.json ← 生スキーマ

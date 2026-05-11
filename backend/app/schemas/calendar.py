@@ -15,6 +15,10 @@ class CalendarEvent(BaseModel):
     location: str | None
     status: Literal["confirmed", "tentative", "cancelled"]
     source: Literal["google"] = "google"
+    # Google extendedProperties.private (string -> string map). Used to detect
+    # events that this app wrote (task_scheduler="1") so they can be excluded
+    # from busy-time computation during re-optimization.
+    extended_properties_private: dict[str, str] = {}
 
 
 class CalendarInfo(BaseModel):

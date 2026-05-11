@@ -45,6 +45,7 @@ export interface Task {
   scheduled_start: string | null;
   scheduled_end: string | null;
   scheduled_fragments: ScheduledFragment[] | null;
+  scheduled_fixed: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -69,6 +70,7 @@ export interface TaskUpdate {
   deadline?: string | null;
   location?: Location | null;
   position?: string;
+  scheduled_fixed?: boolean;
 }
 
 export interface FragmentRead {
@@ -154,6 +156,7 @@ export interface CalendarLocationRule {
   calendar_id: string | null;
   event_summary_matches: string | null;
   location: Location;
+  unless_day_has_calendar_ids?: string[];
 }
 
 export interface LocationCommute {
@@ -194,6 +197,7 @@ export interface SettingsRead {
   slot_min_duration_min: number;
   slot_max_duration_min: number;
   ignore_all_day_events: boolean;
+  voluntary_visit_locations: Location[];
 }
 
 export type SettingsUpdate = Partial<SettingsRead>;

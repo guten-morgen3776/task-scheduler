@@ -5,6 +5,7 @@ import { Header } from "../components/layout/Header";
 import { Card, ErrorBanner } from "../components/ui";
 import { WorkHoursForm } from "../components/settings/WorkHoursForm";
 import { CommutesForm } from "../components/settings/CommutesForm";
+import { VoluntaryVisitForm } from "../components/settings/VoluntaryVisitForm";
 
 export function SettingsPage() {
   const qc = useQueryClient();
@@ -39,6 +40,17 @@ export function SettingsPage() {
               <CommutesForm
                 value={data.location_commutes}
                 onSave={(location_commutes) => update.mutate({ location_commutes })}
+                saving={update.isPending}
+              />
+            </Card>
+
+            <Card className="p-4 space-y-3">
+              <h2 className="text-base font-semibold">自発的に通う場所</h2>
+              <VoluntaryVisitForm
+                value={data.voluntary_visit_locations}
+                onSave={(voluntary_visit_locations) =>
+                  update.mutate({ voluntary_visit_locations })
+                }
                 saving={update.isPending}
               />
             </Card>

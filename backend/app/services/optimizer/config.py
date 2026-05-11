@@ -8,12 +8,29 @@ DEFAULT_WEIGHTS: dict[str, float] = {
     "urgency": 1.0,
     "energy_match": 0.05,
     "unassigned_penalty": 5.0,
+    # KeepTogetherObjective uses two separate weight keys:
+    # - keep_together_fragments: penalty per slot a task occupies
+    # - keep_together_days:      penalty per distinct date a task spans
+    # Calibrated so a fragment costs roughly the energy_match gain of moving
+    # 20 minutes from a low-energy fallback slot (0.21) to a normal slot (0.7);
+    # tasks that fit in one slot reliably stay there, and the optimizer only
+    # splits when it physically must (e.g., the task is larger than any single
+    # slot before the deadline).
+    "keep_together_fragments": 1.0,
+    "keep_together_days": 2.0,
+    # Per-minute bonus for placing deadlined tasks early within their window.
+    # Scales by `(deadline - slot.end) / (deadline - earliest_slot.start)` so
+    # a task due tomorrow vs next week prefer the same "earliest fraction" of
+    # their own horizon. Soft — energy_match (0.05 × minutes × energy) usually
+    # wins close decisions, but identical-energy candidates flip to earlier.
+    "early_placement": 0.02,
 }
 
 DEFAULT_ENABLED_CONSTRAINTS: set[str] = {
     "all_or_nothing",
     "slot_capacity",
     "deadline",
+    "force_deadlined",
     "duration_cap",
     "min_fragment_size",
     "max_fragments",
@@ -25,6 +42,8 @@ DEFAULT_ENABLED_OBJECTIVES: set[str] = {
     "urgency",
     "energy_match",
     "unassigned_penalty",
+    "keep_together",
+    "early_placement",
 }
 
 
