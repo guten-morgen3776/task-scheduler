@@ -52,13 +52,20 @@ def _make_web_flow() -> Flow:
 
     The redirect_uri must match what's registered in the Google Cloud
     Console "Web application" OAuth client.
+
+    PKCE is disabled: we don't keep server-side state between /auth/start and
+    /auth/callback (different Flow instances), so we can't recover the
+    code_verifier. We're a confidential client (client_secret) so PKCE is
+    recommended but not required by Google's token endpoint.
     """
     settings = get_settings()
-    return Flow.from_client_secrets_file(
+    flow = Flow.from_client_secrets_file(
         str(settings.google_credentials_path),
         scopes=settings.google_oauth_scopes,
         redirect_uri=_web_redirect_uri(),
     )
+    flow.autogenerate_code_verifier = False
+    return flow
 
 
 def build_web_authorization_url() -> str:
