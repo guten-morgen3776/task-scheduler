@@ -11,5 +11,7 @@ data/
 secrets/
 tests/
 *.md
+# pyproject.toml references README.md so we must keep it.
+!README.md
 .git/
 .gitignore
