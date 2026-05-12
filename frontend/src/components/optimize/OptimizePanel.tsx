@@ -36,50 +36,49 @@ export function OptimizePanel({ activeListId }: { activeListId: string }) {
   const result = optimize.last;
 
   return (
-    <Card className="p-4 space-y-4">
-      <header className="flex items-center justify-between">
+    <Card className="p-3 sm:p-4 space-y-3 sm:space-y-4">
+      <header className="flex items-center justify-between gap-2">
         <h2 className="text-base font-semibold text-gray-900">最適化</h2>
         {result && (
-          <span className="text-xs text-gray-500">
-            snapshot {result.snapshot_id.slice(0, 8)}… / {result.status}
-            {" / "}
-            {result.solve_time_sec.toFixed(2)}s
+          <span className="text-xs text-gray-500 truncate">
+            {result.snapshot_id.slice(0, 6)}… / {result.status} / {result.solve_time_sec.toFixed(1)}s
           </span>
         )}
       </header>
-      <div className="flex flex-wrap gap-3">
-        <div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:flex md:flex-wrap gap-2 sm:gap-3">
+        <div className="flex flex-col">
           <Label>開始</Label>
           <Input
             type="datetime-local"
             value={start}
             onChange={(e) => setStart(e.target.value)}
-            className="w-44"
+            className="w-full md:w-44"
           />
         </div>
-        <div>
+        <div className="flex flex-col">
           <Label>終了</Label>
           <Input
             type="datetime-local"
             value={end}
             onChange={(e) => setEnd(e.target.value)}
-            className="w-44"
+            className="w-full md:w-44"
           />
         </div>
-        <div>
+        <div className="flex flex-col">
           <Label>対象</Label>
           <select
             value={scope}
             onChange={(e) => setScope(e.target.value as "thisList" | "all")}
-            className="border border-gray-300 rounded-md px-2 py-1 text-sm bg-white"
+            className="w-full md:w-auto border border-gray-300 rounded-md px-2 py-1 text-sm bg-white"
           >
             <option value="thisList">選択中のリストのみ</option>
             <option value="all">全リスト</option>
           </select>
         </div>
-        <div className="ml-auto flex items-end">
+        <div className="md:ml-auto flex items-end">
           <Button
             variant="primary"
+            className="w-full md:w-auto justify-center"
             disabled={optimize.isPending}
             onClick={() => {
               optimize.mutate({

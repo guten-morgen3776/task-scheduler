@@ -21,7 +21,7 @@ export function SettingsPage() {
   return (
     <div className="min-h-screen flex flex-col">
       <Header />
-      <div className="max-w-4xl w-full mx-auto px-4 py-6 space-y-6">
+      <div className="max-w-4xl w-full mx-auto px-3 sm:px-4 py-4 sm:py-6 space-y-4 sm:space-y-6">
         {isLoading && <div className="text-sm text-gray-500">読み込み中…</div>}
         {error && <ErrorBanner message={(error as Error).message} />}
         {data && (

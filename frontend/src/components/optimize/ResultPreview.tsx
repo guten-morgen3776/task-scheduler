@@ -23,20 +23,20 @@ export function ResultPreview({ result }: { result: OptimizeResponse }) {
   }
   return (
     <div className="space-y-3 text-sm">
-      <ul className="space-y-1.5">
+      <ul className="space-y-2">
         {result.assignments.map((a) => (
-          <li key={a.task_id} className="flex items-baseline gap-3">
-            <span className="font-medium text-gray-900 w-48 truncate">
+          <li key={a.task_id} className="flex flex-col sm:flex-row sm:items-baseline gap-1 sm:gap-3">
+            <span className="font-medium text-gray-900 sm:w-48 sm:truncate">
               {a.task_title}
             </span>
-            <span className="text-gray-600 flex-1">
+            <span className="text-gray-600 flex-1 text-xs sm:text-sm">
               {a.fragments.map((f, i) => (
                 <span key={i} className="mr-3 whitespace-nowrap">
                   {formatRange(f.start, f.duration_min)}
                 </span>
               ))}
             </span>
-            <span className="text-xs text-gray-400">{a.total_assigned_min} min</span>
+            <span className="text-xs text-gray-400 sm:shrink-0">{a.total_assigned_min} min</span>
           </li>
         ))}
       </ul>

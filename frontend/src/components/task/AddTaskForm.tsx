@@ -29,7 +29,7 @@ export function AddTaskForm({ listId }: { listId: string }) {
 
   return (
     <form
-      className="flex flex-wrap items-end gap-3"
+      className="grid grid-cols-2 sm:flex sm:flex-wrap sm:items-end gap-2 sm:gap-3"
       onSubmit={handleSubmit((v) => {
         const deadlineIso =
           v.deadline && v.deadline !== ""
@@ -47,17 +47,17 @@ export function AddTaskForm({ listId }: { listId: string }) {
         );
       })}
     >
-      <div className="flex-1 min-w-[12rem]">
+      <div className="col-span-2 sm:flex-1 sm:min-w-[12rem]">
         <Label>タイトル</Label>
         <Input className="w-full" {...register("title")} placeholder="新しいタスク" />
       </div>
       <div>
         <Label>分</Label>
-        <Input type="number" min={5} max={720} step={5} className="w-20" {...register("duration_min", { valueAsNumber: true })} />
+        <Input type="number" min={5} max={720} step={5} className="w-full sm:w-20" {...register("duration_min", { valueAsNumber: true })} />
       </div>
       <div>
         <Label>優先度</Label>
-        <Select className="w-20" {...register("priority", { valueAsNumber: true })}>
+        <Select className="w-full sm:w-20" {...register("priority", { valueAsNumber: true })}>
           {[1, 2, 3, 4, 5].map((p) => (
             <option key={p} value={p}>
               {p}
@@ -67,7 +67,7 @@ export function AddTaskForm({ listId }: { listId: string }) {
       </div>
       <div>
         <Label>場所</Label>
-        <Select className="w-32" {...register("location")}>
+        <Select className="w-full sm:w-32" {...register("location")}>
           <option value="">指定なし</option>
           <option value="home">home</option>
           <option value="university">university</option>
@@ -77,9 +77,14 @@ export function AddTaskForm({ listId }: { listId: string }) {
       </div>
       <div>
         <Label>締切</Label>
-        <Input type="datetime-local" {...register("deadline")} className="w-44" />
+        <Input type="datetime-local" {...register("deadline")} className="w-full sm:w-44" />
       </div>
-      <Button type="submit" variant="primary" disabled={create.isPending || !formState.isValid}>
+      <Button
+        type="submit"
+        variant="primary"
+        className="col-span-2 sm:col-auto w-full sm:w-auto justify-center"
+        disabled={create.isPending || !formState.isValid}
+      >
         追加
       </Button>
     </form>

@@ -52,12 +52,13 @@ export function CurrentSchedulePanel() {
     null;
 
   return (
-    <Card className="p-4 space-y-3">
-      <header className="flex items-center justify-between">
+    <Card className="p-3 sm:p-4 space-y-3">
+      <header className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-base font-semibold text-gray-900">現在のスケジュール</h2>
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-gray-500">今日〜7日後</span>
+        <div className="flex items-center gap-2 ml-auto">
+          <span className="hidden sm:inline text-xs text-gray-500">今日〜7日後</span>
           <Button
+            className="text-xs sm:text-sm"
             disabled={sync.isPending}
             onClick={async () => {
               await sync.mutateAsync();
@@ -98,7 +99,7 @@ export function CurrentSchedulePanel() {
                     key={`${entry.taskId}-${entry.fragmentIndex}`}
                     className="flex items-baseline gap-2 text-sm"
                   >
-                    <span className="text-gray-500 tabular-nums w-24 shrink-0">
+                    <span className="text-gray-500 tabular-nums w-20 sm:w-24 shrink-0 text-xs sm:text-sm">
                       {formatRange(entry.start, entry.end)}
                     </span>
                     <span
