@@ -1,317 +1,256 @@
 # task-scheduler
 
-Google Calendar の空き時間に MIP（整数計画法）で自動配置する個人用タスク管理アプリ。
+Google Calendar の空き時間に、登録したタスクを **MIP（整数計画法）** で自動配置する個人用タスク管理 Web アプリ。
 
-設計ドキュメント:
-- [project_plan.md](project_plan.md) — 全体計画・技術選定
-- [task_scheduler_design.md](task_scheduler_design.md) — 設計概要
-- [docs/phase0_design.md](docs/phase0_design.md) — Phase 0 詳細
-- [docs/phase1_design.md](docs/phase1_design.md) — Phase 1 詳細
+「やることはあるのに、いつやるか決められない」状態を、ソルバー任せにすることで解消する。
 
----
-
-## セットアップ（Phase 0）
-
-### 必要なもの
-
-- Python 3.11+（推奨：3.13）
-- Node.js 20+
-- [uv](https://docs.astral.sh/uv/)（`brew install uv` または `curl -LsSf https://astral.sh/uv/install.sh | sh`）
-- pnpm（`npm i -g pnpm`）
-
-### 1. ユーザー側で行うこと
-
-#### Google Cloud Console
-
-1. https://console.cloud.google.com/ で新規プロジェクトを作成（例：`task-scheduler-personal`）
-2. 「API とサービス」→「ライブラリ」で **Google Calendar API のみ** を有効化
-3. 「OAuth 同意画面」
-   - ユーザータイプ：**外部**
-   - スコープに `https://www.googleapis.com/auth/calendar` を追加
-   - テストユーザーに自分の Gmail アドレスを追加
-4. 「認証情報」→「OAuth 2.0 クライアント ID を作成」
-   - 種類：**デスクトップアプリ**
-   - JSON をダウンロードして `backend/secrets/credentials.json` に配置
-
-#### `.env` の準備
-
-```bash
-cd backend
-cp .env.example .env
-```
-
-`TOKEN_ENCRYPTION_KEY` 用に Fernet 鍵を生成して `.env` に貼る:
-
-```bash
-cd backend
-uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-```
-
-出力された鍵を `.env` の `TOKEN_ENCRYPTION_KEY=` の右側に貼り付けてください（Phase 1 の OAuth トークン暗号化に必須）。
-
-### 2. バックエンド起動
-
-```bash
-cd backend
-uv sync
-uv run alembic upgrade head
-uv run uvicorn app.main:app --reload --port 47823
-```
-
-別ターミナルで動作確認:
-
-```bash
-curl http://localhost:47823/health
-# → {"status":"ok"}
-```
-
-### 3. フロントエンド起動
-
-```bash
-cd frontend
-pnpm install
-pnpm dev
-```
-
-ブラウザで http://localhost:47824 にアクセスして Vite の初期画面が表示されれば OK。
+- **デモ（個人OAuth設定済み、本人のみログイン可）**
+  - フロント: https://task-scheduler.pages.dev
+  - API: https://super-ultra-task-solver.fly.dev
 
 ---
 
-## Phase 1 動作確認
+## 1. このアプリで解決したかったこと
 
-Phase 1 の機能（OAuth + タスク CRUD + Calendar 取得）は curl で検証できます。
+Google ToDo / カレンダーを併用する中で、次のような不満があった。
 
-```bash
-# 1. サーバー起動
-cd backend
-uv run alembic upgrade head
-uv run uvicorn app.main:app --reload --port 47823
-```
+- **タスクは溜まるが、いつやるかを毎回考えるのが面倒** — 締切・優先度・所要時間を見比べて手動で時間割を組むコストが高い
+- **重いタスクを疲れている時間に置いてしまう** — 集中力が必要な作業を夜遅くに回して結局終わらない
+- **「場所」を考慮した配置がどのツールでもできない** — 大学にいる時間は紙のノートが必要なタスクをやりたい、家でしかできないタスクは家の時間に置きたい
+- **既存予定（インターン勤務・授業）との被りを毎回手で避けるのが大変**
 
-別ターミナルで:
+これらを「タスクの属性（所要時間・優先度・締切・場所）」と「日のキャパシティ（拘束時間ベースの day_type）」「スロットのエネルギー」をマッチングする **整数計画問題** として定式化し、毎日の時間割をワンクリックで生成できるようにした。
 
-```bash
-# 2. OAuth ログイン（ブラウザが開いて Google 認可ページに飛ぶ）
-curl -X POST http://localhost:47823/auth/google/local
+---
 
-# 3. ログイン状態確認
-curl http://localhost:47823/auth/me
-# → {"user_id":"...","google_email":"...","scopes":[...],"token_expires_at":"..."}
+## 2. 主な機能
 
-# 4. タスクリスト作成
-LIST_ID=$(curl -s -X POST http://localhost:47823/lists \
-  -H "Content-Type: application/json" \
-  -d '{"title":"勉強"}' | python -c 'import json,sys;print(json.load(sys.stdin)["id"])')
-echo "list: $LIST_ID"
+### タスク管理（Google ToDo 風 UI の自作タスク管理）
 
-# 5. タスク作成
-TASK_ID=$(curl -s -X POST "http://localhost:47823/lists/$LIST_ID/tasks" \
-  -H "Content-Type: application/json" \
-  -d '{"title":"レポート執筆","duration_min":90,"weight":0.8,"priority":4,"deadline":"2026-05-15T23:59:59+09:00"}' \
-  | python -c 'import json,sys;print(json.load(sys.stdin)["id"])')
-echo "task: $TASK_ID"
+- タスクリスト（複数）/ タスク（タイトル・所要時間・優先度・締切・場所・メモ）の CRUD
+- 完了 / 未完了切替、ドラッグ並び替え
+- 「場所」属性：`home` / `university` / `office` / `anywhere`
 
-# 6. タスク一覧
-curl "http://localhost:47823/lists/$LIST_ID/tasks"
+### Google Calendar 連携
 
-# 7. カレンダー予定取得（URL エンコードに注意）
-curl "http://localhost:47823/calendar/events?start=2026-05-08T00:00:00%2B09:00&end=2026-05-15T23:59:59%2B09:00"
+- OAuth2（Web Application Flow）で複数カレンダー横断の予定取得
+- 祝日カレンダーなどは設定で除外可能
+- 最適化結果はワンクリックで Google Calendar に書き込み、再実行時は冪等に上書き
 
-# 8. タスク完了 / 取消
-curl -X POST "http://localhost:47823/tasks/$TASK_ID/complete"
-curl -X POST "http://localhost:47823/tasks/$TASK_ID/uncomplete"
+### 自動スケジューリング（MIP ソルバー）
 
-# 9. ログアウト（DB のトークンを削除）
-curl -X DELETE http://localhost:47823/auth/google
-```
+- 「カレンダーの埋まり方」と「ユーザー設定の作業可能時間帯」から、その週の作業可能スロットを自動生成
+- 拘束時間（バッファ込み）でその日の `day_type` を判定（`free_day` / `light_day` / `medium_day` / `heavy_day` / `intern_day`）
+  - 各 day_type が `energy_score` と「1 タスクの最大長」をスロットに与える
+- MIP で以下を同時に最適化:
+  - **ハード制約**: 締切、スロット容量、場所一致、最小断片サイズ、最大分割数、所要時間上限、締切付きタスクの強制配置
+  - **目的関数**: 優先度加点 / 緊急度加点 / 高エネルギースロットへの長尺タスク誘導 / 同一タスクの集約 / 早期配置 / 未配置のペナルティ
 
-OpenAPI ドキュメント: http://localhost:47823/docs
+### 再現実験用スナップショット
 
-### カレンダー取得ポリシー（重要）
+- `/optimize` 実行ごとに「入力（タスク・スロット・設定）と結果」を Snapshot として保存
+- `/optimizer/snapshots/{id}/replay` で同じ入力に対し設定を変えて再実行可能 → 重みのチューニングが確定的に行える
 
-このアプリは Google ToDo / Tasks と**同期しません**（[project_plan.md §1.1](project_plan.md)）。
-代わりに **Google Calendar の複数カレンダーから「埋まっている時間」を読み取って最適化の入力にします**。
+### PWA / スマホ対応
 
-複数カレンダーの扱い方針（[project_plan.md §1.0](project_plan.md) の正本）:
+- Cloudflare Pages 経由で配信、ホーム画面に追加するとアプリのように起動
+- モバイル幅でも操作可能なレイアウト
 
-| カレンダー種別 | 例 | 取得対象 |
+---
+
+## 3. 使用技術と選定理由
+
+### バックエンド
+
+| 技術 | 用途 | 選定理由 |
 |---|---|---|
-| プライマリ | 個人メイン（インターン勤務、私用予定） | **必須** |
-| セカンダリ | 「試験対策 計画」等自作 | **必須** |
-| 購読（iCal） | **大学時間割（UTAS など）** | **必須** |
-| 公的 | 「日本の祝日」 | **対象外**（忙しさに無関係） |
+| **Python 3.13** | 言語 | 最適化ライブラリ（PuLP / OR-Tools）の充実度から実質一択 |
+| **FastAPI** | Web フレームワーク | 非同期対応・Pydantic v2 と統合された型ヒント・OpenAPI 自動生成 |
+| **Pydantic v2** | バリデーション | リクエスト/レスポンス、`OptimizerConfig` の動的上書きを型安全に扱える |
+| **SQLAlchemy 2.0 + Alembic** | ORM / マイグレーション | 後から PostgreSQL に乗せ替える際も接続文字列差し替えで済むよう抽象を維持 |
+| **SQLite + aiosqlite** | DB | **個人利用**前提でファイル 1 個に集約。Docker 不要、バックアップはコピーで完結。後から PostgreSQL に乗せ替える際は接続文字列の差し替えだけで済むよう SQLAlchemy 抽象越しに使う |
+| **PuLP + CBC** | MIP ソルバー | OSS で依存軽量、MVP として十分な規模（数十タスク × 数百スロット）を秒オーダーで解ける。インターフェイス抽象を挟んでいるので OR-Tools への乗り換えも容易 |
+| **uv** | パッケージ管理 | pip / Poetry より圧倒的に高速。`pyproject.toml` ベースで Lock も自動 |
+| **Google OAuth + Calendar API** | 外部連携 | Tasks API は独自フィールド（所要時間・場所・優先度）を持てないため使用せず、Calendar API のみ採用 |
+| **cryptography (Fernet)** | refresh_token 暗号化 | 単一ユーザーでも DB に平文保存しない。鍵は環境変数で外出し |
 
-`GET /calendar/calendars` でカレンダー一覧を取得し、`GET /calendar/events?calendar_ids=a,b,c` で複数指定取得できます。
-Phase 2 で `user_settings.busy_calendar_ids` / `ignore_calendar_ids` を導入し、毎回パラメータを渡さなくても済むようにします。
+### フロントエンド
 
-### Phase 2 動作確認（スロット生成）
+| 技術 | 用途 | 選定理由 |
+|---|---|---|
+| **React 19 + Vite** | フレームワーク / ビルド | 軽量で立ち上がりが速く、Cloudflare Pages の静的配信と相性が良い |
+| **TypeScript** | 言語 | API の型を生成 / 共有して、UI とサーバ間の食い違いを早期に検出 |
+| **TanStack Query** | サーバ状態管理 | キャッシュ + 楽観的更新 + リフェッチを宣言的に書ける。タスク CRUD と最適化結果のキャッシュ整合が肝なので必須 |
+| **React Hook Form + Zod** | フォーム / 検証 | タスク作成・設定編集が多いため、軽量で型に乗ったバリデーションが必要 |
+| **React Router v7** | ルーティング | ページ数が少ないため Next.js は過剰、SPA で十分 |
+| **Tailwind CSS v4** | スタイリング | クラスベースで Google ToDo 風のシンプルな UI を素早く組む |
+| **vite-plugin-pwa** | PWA 化 | スマホのホーム画面追加 + 最低限のオフライン耐性を、設定だけで実現 |
 
-```bash
-# 現在の設定確認（初回は既定値で作成）
-curl http://localhost:47823/settings | python -m json.tool
+### インフラ / デプロイ
 
-# 祝日カレンダーを ignore に追加
-curl -X PUT http://localhost:47823/settings \
-  -H "Content-Type: application/json" \
-  -d '{"ignore_calendar_ids":["ja.japanese#holiday@group.v.calendar.google.com"]}'
+| 技術 | 用途 | 選定理由 |
+|---|---|---|
+| **Fly.io（Tokyo / nrt）** | バックエンド | 無料枠で常時稼働 + 永続ボリュームに SQLite を置ける。`fly deploy` 一発で済む |
+| **Cloudflare Pages** | フロントエンド | 無料・無制限帯域、GitHub 連携で自動デプロイ。SPA リダイレクトもネイティブ対応 |
+| **Fly Volumes** | DB 永続化 | SQLite を `/mnt/data/app.db` で永続化、PostgreSQL を立てる必要なし |
 
-# 来週分のスロット生成（祝日以外の全カレンダー横断）
-curl "http://localhost:47823/calendar/slots\
-?start=2026-05-11T00:00:00%2B09:00\
-&end=2026-05-17T23:59:59%2B09:00" | python -m json.tool
+### 開発支援
+
+| 技術 | 用途 |
+|---|---|
+| ruff | Python の Lint / Format |
+| pytest + pytest-asyncio | バックエンドのユニット / シナリオテスト |
+| ESLint + typescript-eslint | TS の Lint |
+| Alembic | スキーマ進化（場所列追加・weight列廃止など複数回のマイグレーション） |
+
+---
+
+## 4. アーキテクチャ
+
 ```
-
-詳細: [docs/phase2_design.md](docs/phase2_design.md) / [docs/api_cheatsheet.md §4.5–§4.6](docs/api_cheatsheet.md)
-
-### Phase 3 動作確認（最適化）
-
-```bash
-# タスクを 5-10 個入れた状態で
-curl -X POST http://localhost:47823/optimize \
-  -H "Content-Type: application/json" \
-  -d '{"start":"2026-05-11T00:00:00+09:00","end":"2026-05-17T23:59:59+09:00"}' \
-  | python -m json.tool
-
-# スナップショット一覧
-curl http://localhost:47823/optimizer/snapshots
-
-# 設定変えて同じ入力で再実行（同じ snapshot を replay）
-curl -X POST http://localhost:47823/optimizer/snapshots/<id>/replay \
-  -H "Content-Type: application/json" \
-  -d '{"config_overrides":{"weights":{"energy_match":0.2}}}'
-```
-
-詳細: [docs/phase3_design.md](docs/phase3_design.md) / [docs/api_cheatsheet.md §4.7](docs/api_cheatsheet.md)
-
-### テスト
-
-```bash
-cd backend
-uv run pytest -v
+                ┌────────────────────────┐
+                │  Cloudflare Pages       │
+                │  (React / Vite / PWA)   │
+                └──────────┬──────────────┘
+                           │ REST (HTTPS)
+                           ▼
+                ┌────────────────────────┐
+                │  Fly.io (FastAPI)       │
+                │                         │
+                │  ┌─ Auth (OAuth Web Flow)│─┐
+                │  │                       │ │
+                │  ├─ Task CRUD           │ │  ┌──────────────────┐
+                │  │                       │ ├─▶│  Google Calendar │
+                │  ├─ Calendar Adapter    │ │  │       API        │
+                │  │  (複数カレンダー)    │ │  └──────────────────┘
+                │  │                       │ │
+                │  ├─ Slot Generator       │ │
+                │  │  (日タイプ・場所推定) │ │
+                │  │                       │ │
+                │  └─ Optimizer            │ │
+                │     PuLP / CBC          │ │
+                │     ├ constraints/*.py  │ │
+                │     ├ objectives/*.py   │ │
+                │     └ snapshot 保存     │ │
+                │                          │ │
+                └──────────┬──────────────┘ │
+                           │                │
+                           ▼                │
+                ┌────────────────────────┐  │
+                │  SQLite (Fly Volume)    │  │
+                │  tasks / lists /        │  │
+                │  user_settings /        │  │
+                │  oauth_token (暗号化) /  │  │
+                │  snapshots / event_log  │  │
+                └─────────────────────────┘  │
 ```
 
 ---
 
-## 本番デプロイ (Phase 7)
+## 5. 設計上の工夫
 
-> 詳細: [docs/phase7_design.md](docs/phase7_design.md)
-> ローカル運用のままで構わない場合はこのセクションは無視して OK。
+### 5.1 最適化エンジンを「差し替え可能」な構造にした
 
-スマホから 24/365 でアクセスできるようにする手順。Mac を起動していなくても使えるのが目的。
+最適化は試行錯誤が前提なので、制約・目的関数を **1 クラス 1 ファイル** で配置し、`OptimizerConfig` の `enabled_constraints` / `enabled_objectives` で動的に ON/OFF できる構造にしている。
 
-### 構成
-
-- **バックエンド**: Fly.io（無料枠、Tokyo リージョン）
-  - SQLite を Fly Volume `/mnt/data` に永続化
-  - 起動時に `alembic upgrade head`
-- **フロント**: Cloudflare Pages（無料）
-  - GitHub push で自動デプロイ
-  - PWA 対応（`vite-plugin-pwa`）— スマホのホーム画面に追加可能
-
-> 順序が大事: **Fly のアプリ名（= 本番 URL）を先に予約 → Google Cloud Console に redirect URI を登録**、の流れ。URL が決まらないと OAuth クライアントを作れない。
-
-### 1. Fly.io でアプリ名だけ予約
-
-```bash
-brew install flyctl
-flyctl auth signup       # or signin
-cd backend
-flyctl launch --no-deploy
-# 対話形式：
-#   - App name: 例 `aoki-task-scheduler`（fly.dev サブドメインになる）
-#   - Region:   nrt (Tokyo)
-#   - Deploy now? No
+```
+backend/app/services/optimizer/
+├── domain.py              # Task / Slot / Assignment（ソルバー非依存）
+├── backend/
+│   ├── base.py            # SolverBackend ABC
+│   └── pulp_backend.py    # PuLP 実装（OR-Tools 実装を後から追加可能）
+├── constraints/
+│   ├── deadline.py
+│   ├── slot_capacity.py
+│   ├── location_compatibility.py
+│   ├── force_deadlined.py
+│   ├── min_fragment_size.py
+│   ├── max_fragments.py
+│   └── duration_cap.py
+├── objectives/
+│   ├── priority.py
+│   ├── urgency.py
+│   ├── energy_match.py
+│   ├── early_placement.py
+│   ├── keep_together.py
+│   └── unassigned_penalty.py
+├── config.py              # OptimizerConfig（重み・有効化フラグ・時間制限）
+├── orchestrator.py        # 制約と目的関数を集めて solve
+└── service.py             # infeasible retry chain（後述）
 ```
 
-この時点で `https://<選んだ名前>.fly.dev` が予約される。サーバーはまだ動いていない。
+新しい制約を追加するときは「ファイルを 1 つ書いて `enabled_constraints` に名前を入れる」だけで済む。
 
-### 2. Cloudflare Pages のプロジェクト名を決める
+### 5.2 infeasible retry chain
 
-GitHub に push しておく（未だなら）:
+「締切付きタスクは必ず配置する」を強い制約にしているため、素朴に解くと簡単に infeasible になる。これに対し、最大 4 段階で段階的に制約を緩めて再実行する仕組みを入れている。
 
-```bash
-git push -u origin main
-```
+| 段 | 緩和内容 |
+|---|---|
+| 1 | 通常運用（work_hours 内、duration_cap 有効） |
+| 2 | 作業時間を 23:30 まで延長 |
+| 3 | 作業時間を 23:59 まで延長 |
+| 4 | duration_cap を無効化（last resort） |
 
-Cloudflare Dashboard → Pages → Connect to Git → リポジトリ選択 → Project name を設定（例: `task-scheduler`）。`https://task-scheduler.pages.dev` が予約される。最初のビルドは失敗してもよい（後で `VITE_API_BASE` を設定して再ビルドする）。
+各段の延長スロットは `energy_score × 0.3` で生成されるため、通常段で fit するケースでは夜スロットは使われない。どの段で確定したかは `notes` で UI に返している。
 
-### 3. Google Cloud Console — Web 種別の OAuth クライアント
+### 5.3 場所制約のための「場所ウィンドウ」モデル
 
-ローカル用とは別に「ウェブアプリケーション」種別のクライアントを発行:
+「同じ日に大学にいる間は、授業の合間でも図書館でタスクできる」という現実を素直に表現するため、同日の同場所イベントを 1 つのウィンドウに集約し、ウィンドウの境界（始点と終点）にだけ通学・通勤時間を加算する設計にした。ウィンドウ内の隙間は free。これにより「授業の合間 = 大学 location のスロット」「夕方帰宅後 = home location のスロット」が自動的に分離される。
 
-1. 認証情報 → 「OAuth 2.0 クライアント ID を作成」 → 種類: **ウェブアプリケーション**
-2. 承認済みのリダイレクト URI に以下を **すべて** 登録:
-   - `https://<上で決めた fly 名>.fly.dev/auth/google/callback`
-   - `http://localhost:47823/auth/google/callback` （ローカルでも Web Flow を試したい場合）
-3. JSON をダウンロード（本番用 credentials.json）
+### 5.4 再現実験を可能にするスナップショット
 
-### 4. Fly Volume と Secrets 設定 + deploy
+`/optimize` の入力（タスク・スロット・設定）と結果をまるごと DB に保存し、`/snapshots/{id}/replay` で設定を上書きして同じ入力に対し別条件で再実行できる。重みのチューニングが「気分」ではなく確定的なテストになる。
 
-```bash
-cd backend
+### 5.5 将来のクラウド・モバイル移行を見越した設計
 
-# 永続ボリューム作成（SQLite 用）
-flyctl volumes create task_scheduler_data --region nrt --size 1
+最初から「個人ローカル利用」と「将来のクラウド・マルチユーザー化」を両立できるよう、以下の方針で書いている。
 
-# Secrets 設定
-flyctl secrets set \
-  TOKEN_ENCRYPTION_KEY="$(grep TOKEN_ENCRYPTION_KEY .env | cut -d= -f2)" \
-  GOOGLE_CREDENTIALS_PATH="/mnt/data/credentials.json" \
-  PUBLIC_BACKEND_URL="https://<your-fly-app>.fly.dev" \
-  PUBLIC_FRONTEND_URL="https://<your-pages-app>.pages.dev"
+- **DB**: SQLAlchemy 抽象越し / `user_id` カラムを最初から持つ（値は当面固定）
+- **API**: ステートレス REST、リクエストごとに `user_id` でアクセス制御できる構造
+- **時刻**: 保存は UTC + TZ 情報、表示は Asia/Tokyo に変換
+- **設定**: 環境変数経由（pydantic-settings）、ローカル絶対パスをコードに書かない
+- **OAuth**: Desktop Flow → Web Flow への移行を Phase 7 で実施済み
 
-# credentials.json (Web 種別) と既存 app.db を volume に転送
-flyctl ssh sftp shell
-# put secrets/credentials.json /mnt/data/credentials.json
-# put data/app.db /mnt/data/app.db
-# bye
+これらにより、Phase 7 で実際に Fly.io へ移行した際は、コード変更を最小限に抑えられた。
 
-# デプロイ
-flyctl deploy
-flyctl status        # ヘルスチェック
-curl https://<your-fly-app>.fly.dev/health
-```
+---
 
-### 5. Cloudflare Pages の build 設定を埋めて再デプロイ
+## 6. 開発フェーズ
 
-Step 2 で接続済みの Pages プロジェクトに設定を入れる:
+機能ごとにフェーズを区切り、それぞれ設計ドキュメントを残して進めた。
 
-1. Settings → Builds & deployments:
-   - **Build command**: `cd frontend && pnpm install && pnpm build`
-   - **Build output**: `frontend/dist`
-   - **Root directory**: `/`
-2. Settings → Environment variables:
-   - `VITE_API_BASE` = `https://<your-fly-app>.fly.dev`
-3. Deployments → Retry build (or push to main)
+| Phase | 内容 | 設計ドキュメント |
+|---|---|---|
+| 0 | 環境構築 / Alembic 初期化 / OAuth クライアント発行 | [docs/phase0_design.md](docs/phase0_design.md) |
+| 1 | OAuth ローカルフロー / タスク CRUD / Calendar 取得 | [docs/phase1_design.md](docs/phase1_design.md) |
+| 2 | スロット生成（日タイプ判定・移動バッファ） | [docs/phase2_design.md](docs/phase2_design.md) |
+| 3 | MIP 最適化エンジン（差し替え可能構造） | [docs/phase3_design.md](docs/phase3_design.md) |
+| 4 | 場所制約 / 場所ウィンドウモデル | [docs/phase4_design.md](docs/phase4_design.md) |
+| 5 | カレンダー書き込み（冪等） | [docs/phase5_design.md](docs/phase5_design.md) |
+| 6 | React UI / 設定画面 / 最適化結果プレビュー | [docs/phase6_design.md](docs/phase6_design.md) |
+| 7 | Fly.io + Cloudflare Pages デプロイ / Web OAuth Flow / PWA | [docs/phase7_design.md](docs/phase7_design.md) |
 
-`https://<your-pages-app>.pages.dev` にアクセス → Google でログイン → 動作確認。
+その他の参考ドキュメント:
 
-### 6. スマホで使う（PWA）
+- [project_plan.md](project_plan.md) — 全体計画・技術選定の意思決定
+- [task_scheduler_design.md](task_scheduler_design.md) — 初期の設計概要
+- [docs/optimizer_overview.md](docs/optimizer_overview.md) — 最適化エンジンの全変数・全制約・全目的関数の一覧
+- [docs/api_cheatsheet.md](docs/api_cheatsheet.md) — API リファレンス
+- [docs/feature_backlog.md](docs/feature_backlog.md) — 要望と実装状況
 
-- iOS Safari: Pages の URL を開く → 共有ボタン → 「ホーム画面に追加」
-- Android Chrome: URL を開くと「インストール」プロンプトが出る
+---
 
-ホーム画面アイコンから起動すれば全画面で動作。
+## 7. 今後の改善余地
 
-### 完了判定
+- **行動学習**: 過去の実績（予定通り完了したか、ずらしたか）から `energy_score` や `weight` のデフォルト値を自動調整
+- **OR-Tools への切り替え**: タスク数が増えて PuLP が秒で解けなくなった場合の置き換え（インターフェイスは既に抽象化済み）
+- **インクリメンタル最適化**: `/optimize` を毎回ゼロから解くのではなく、既存配置を維持しつつ差分だけ再計算
+- **プッシュ通知**: PWA + Web Push で「次のタスクが 10 分後に始まる」を通知
+- **マルチユーザー化**: `user_id` カラムは既に用意済み、UI ログイン画面と JWT 発行を足せば移行可能
 
-- [ ] `https://<fly-app>.fly.dev/health` が 200
-- [ ] Cloudflare Pages の URL で Google ログイン → 認可画面 → リダイレクト → ホームに着く
-- [ ] スマホで開いてタスク追加・最適化・カレンダー書き込みが完走
-- [ ] Mac を sleep / 終了させてもスマホから引き続き使える
-- [ ] ホーム画面に追加してアプリっぽく開ける
+---
 
-### 設定 cheat sheet
+## ライセンス
 
-| 環境 | DATABASE_URL | TOKEN_ENCRYPTION_KEY | GOOGLE_CREDENTIALS_PATH | PUBLIC_BACKEND_URL | PUBLIC_FRONTEND_URL |
-|---|---|---|---|---|---|
-| local dev | `sqlite+aiosqlite:///./data/app.db` | `.env` | `./secrets/credentials.json` (Desktop 種別) | `http://localhost:47823` | `http://localhost:47824` |
-| Fly.io prod | `sqlite+aiosqlite:////mnt/data/app.db` | Fly secrets | `/mnt/data/credentials.json` (Web 種別) | `https://<fly>.fly.dev` | `https://<pages>.pages.dev` |
-
-### 行動ログ
-
-[docs/phase7_design.md §3.4](docs/phase7_design.md) の通り、各操作は `event_log` テーブルに追記されます（読出 UI なし、将来の解析向け）。手動で覗くなら:
-
-```bash
-flyctl ssh console -C "sqlite3 /mnt/data/app.db 'SELECT event_type, occurred_at, payload FROM event_log ORDER BY id DESC LIMIT 20'"
-```
+個人利用前提のため、ライセンスは未設定。
